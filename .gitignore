@@ -17,5 +17,5 @@ plugins/canvas/*/node_modules
 web/public/plugins
 .workbuddy
 .idea
-PRD
+PRD/
 CLAUDE.md
