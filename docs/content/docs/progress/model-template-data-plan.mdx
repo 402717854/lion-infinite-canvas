@@ -1,0 +1,141 @@
+---
+title: Model Template Data Plan
+description: Move built-in model call templates out of TS string literals into standalone text files loaded as raw strings at build time
+---
+
+# Model Template Data Plan
+
+## Conclusion
+
+Move the eight built-in template bodies out of the template literals in `model-plugin.ts` into standalone files under `model-templates/`, loaded as raw strings through Vite `?raw` at build time, with `capability` and `provider` encoded in the file name. The `getPluginTemplates()` contract stays unchanged, so neither the editor nor the authoring prompt needs modification.
+
+## Current state
+
+Location: `web/src/services/api/model-plugin.ts`, where `getPluginTemplates` spans lines `226–992`.
+
+- 992 lines total, 767 of them template bodies (about 77%), roughly 20 KB.
+- Eight templates: `image` / `video` / `audio` / `text`, each with an OpenAI and a Gemini variant.
+- Getting the bodies into string literals requires **74 manual escapes**: 42 backticks, 30 `${` sequences, and 2 regex backslashes.
+- Template bodies are function-body fragments (ending with `return await generateXxx(...)`), not valid ES modules.
+- Labels depend on the i18n keys `modelPlugin.templates.openai` / `modelPlugin.templates.gemini`.
+- Adding a provider means editing TS source; there is no data-only extension path.
+
+## Goals
+
+1. Template bodies live outside TS, with no escaping when editing.
+2. Adding a template means adding one file, with no logic changes.
+3. `getPluginTemplates()` keeps its contract; `model-script-editor.tsx` and `getPluginAuthoringPrompt` stay untouched.
+4. Everything is bundled at build time; no runtime network requests.
+
+Out of scope: user-defined templates at runtime (that is P3 of the [Model Script Library Plan](/docs/progress/model-script-library-plan), which should share the same script data), and localized template bodies. Bodies keep English comments; only labels are localized.
+
+## Approach: file as configuration
+
+### Layout
+
+```
+web/src/services/api/model-templates/
+├── image.openai.js
+├── image.gemini.js
+├── video.openai.js
+├── video.gemini.js
+├── audio.openai.js
+├── audio.gemini.js
+├── text.openai.js
+├── text.gemini.js
+└── index.ts          # roughly 20 lines: glob load + metadata derivation
+```
+
+Names follow `<capability>.<provider>.js`. File contents are the script source with **all escaping removed**: `` \` `` → `` ` ``, `\${` → `${`, `\\d` → `\d`.
+
+### Loading
+
+```ts
+const files = import.meta.glob("./model-templates/*.js", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+```
+
+`eager: true` inlines the text as string constants at build time, so there is no runtime request and no async path. Ordering from the glob is stable; sorting by file name reproduces the current order.
+
+### Metadata derivation
+
+No separate manifest, which avoids drift between manifest and files:
+
+```ts
+function templateFromPath(path: string, script: string): PluginTemplate {
+  const [capability, provider] = path.split("/").pop()!.replace(/\.js$/, "").split(".");
+  return {
+    id: `${capability}.${provider}`,
+    label: i18n.t(`modelPlugin.templates.${provider}`, { defaultValue: provider }),
+    script,
+  };
+}
+```
+
+`capability` becomes the grouping key, `provider` selects the label key, and a missing key falls back to the provider name.
+
+### Return type
+
+```ts
+export type PluginTemplate = { id: string; label: string; script: string };
+```
+
+`label` and `script` keep their names; `id` is additive and later serves as the origin identifier for "save as script" in the script library. Existing call sites read only `label` and `script`.
+
+### Call sites
+
+| Location | Change |
+| --- | --- |
+| `model-plugin.ts` | Remove the template function body and the `PluginTemplate` definition, re-export from `./model-templates` so existing import paths keep working |
+| `model-script-editor.tsx:43` | None |
+| `model-plugin.ts:211` (`getPluginAuthoringPrompt`) | None |
+| i18n | None; a new provider needs `modelPlugin.templates.<provider>` |
+
+## Toolchain constraints
+
+1. **prettier fails to parse these files.** A top-level `return` is invalid module syntax, so `prettier --check .` breaks. Add `src/services/api/model-templates/` to `.prettierignore`.
+2. **tsc does not check them.** `tsconfig.json` includes only `src/**/*.ts` and `src/**/*.tsx`; despite `allowJs: true`, the `.js` templates are outside the program and undefined identifiers (`model`, `baseUrl`) will not error.
+3. **`?raw` typing is ready.** `src/vite-env.d.ts` already references `vite/client`.
+
+## Alternatives
+
+| Option | Form | Pros | Cons | Verdict |
+| --- | --- | --- | --- | --- |
+| `.js` + `?raw` + prettier ignore | Standalone files, highlighting kept | No escaping, readable diffs, no runtime cost | One ignore rule | **Recommended** |
+| `.txt` / `.js.txt` | Standalone files | Zero toolchain friction | No JS highlighting | Fallback |
+| JSON manifest + bodies | Manifest plus files | Explicit metadata | Manifest drifts from files | Rejected |
+| `public/templates` + `fetch` | Runtime assets | Hot-updatable | Async loading, failure paths, deploy coupling | Rejected |
+| Markdown + frontmatter | Metadata and body together | Co-located | Requires frontmatter parsing | Rejected |
+
+## Bundle impact
+
+The templates are about 20 KB of text. `model-plugin.ts` is imported by `image.ts` / `video.ts` / `audio.ts`, so eager loading puts this text in the generation-path chunk.
+
+- Accept it: smallest change, `getPluginTemplates()` stays synchronous.
+- Avoid it: make `model-templates/index.ts` non-eager and export `loadPluginTemplates(): Promise<...>`, loaded only when the editor opens. The cost is turning `getPluginTemplates` and `getPluginAuthoringPrompt` async plus a loading state in the editor.
+
+Start synchronous (one change point, lowest risk) and make it async only if bundle size becomes a real problem; that later change is confined to `index.ts` and two call sites.
+
+## Steps
+
+1. Create `model-templates/`, move each of the eight bodies into its own file, remove the 74 escapes.
+2. Add `index.ts`: glob load, group by `capability`, sort by file name, assemble `PluginTemplate[]`.
+3. Remove the template region (`224–972`) and the `PluginTemplate` definition from `model-plugin.ts`; re-export instead.
+4. Add the directory to `.prettierignore`.
+5. Verify with a script that the old and new `getPluginTemplates()` outputs are byte-identical (escapes are restored at runtime, so the outputs should match exactly).
+
+## Verification
+
+- Eight template buttons, same count and order per capability.
+- Inserting each template matches the old output, especially `` `${baseUrl}/v1/...` `` in the OpenAI templates and the `\d+` regex in the Gemini templates.
+- The "complete example" section of the copied authoring prompt matches.
+- No new runtime requests in the build output; first-load size delta within the expected 20 KB.
+
+## Risks
+
+- **Escape restoration is the main risk.** A single missed `` \` `` yields an invalid script that no compiler catches. The string comparison in step 5 is the guard, and it is more reliable than visual inspection.
+- **File names are an implicit contract.** Renaming changes both id and grouping. `index.ts` accepts only `<capability>.<provider>` and silently skips anything else, with no fallback parsing.
+- **Templates leave prettier's coverage.** Style consistency becomes a manual concern, which is acceptable; a separate formatter pass over function bodies can be added later if needed.

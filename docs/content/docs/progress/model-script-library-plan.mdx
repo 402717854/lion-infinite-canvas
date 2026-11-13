@@ -1,0 +1,102 @@
+---
+title: Model Script Library Plan
+description: Turn per-model call scripts into a standalone entity that can be saved, queried, and invoked
+---
+
+# Model Script Library Plan
+
+## Background
+
+The project already supports user-authored model call scripts: a JavaScript snippet attached to a model replaces the built-in API implementation for generation. The current implementation stores the script on the model itself, and all three stages are wired:
+
+| Stage | Location | Current behavior |
+| --- | --- | --- |
+| Data | `web/src/stores/use-config-store.ts` | `ChannelModel.script?: string` |
+| Save | `persist` in `use-config-store.ts` | Written inside the whole config payload to localStorage key `infinite-canvas:ai_config_store`, together with `apiKey` |
+| Query | `resolveModelScript` in `use-config-store.ts` | Resolves the model by `channelId::model` and returns `script.trim()`; synchronous and model-only |
+| Invoke | `runModelPlugin` in `web/src/services/api/model-plugin.ts` | Runs the script via `new Function` with `prompt` / `messages` / `model` / `baseUrl` / `apiKey` / `http` / `request` / `poll` / `signal` / `onDelta` injected |
+| Entry points | `image.ts`, `video.ts`, `audio.ts` | Use the script when present, otherwise fall back to the built-in call |
+
+`"model-script"` already exists in `ConfigTabKey` and `config.tabs.modelScript`, but `app-config-modal.tsx` renders no panel for it.
+
+## Gaps
+
+1. **Save**: one script per model. Reusing the same OpenAI-compatible script across three models requires three copies. No name, capability, description, or updated timestamp. Script bodies share a localStorage key with `apiKey`.
+2. **Query**: no list surface. Users must open each model in the channel drawer; no filtering by capability, no keyword search, no view of which models have scripts.
+3. **Invoke**: no syntax validation on save, no execution timeout, and return shapes are validated per call site (only images have `normalizePluginImages`).
+
+## Goals
+
+- Scripts become standalone entities: named, reusable, referenced across models and channels.
+- One query surface: filter by capability, search by name, inspect mounted models.
+- A single execution entry point, with save-time and run-time constraints added.
+
+Out of scope: a script marketplace, cloud sharing, version history, and Worker / iframe sandboxing.
+
+## Data model
+
+New store `web/src/stores/use-model-script-store.ts`:
+
+```ts
+type ModelScript = {
+  id: string;
+  name: string;
+  capability: ModelCapability;
+  description?: string;
+  code: string;
+  updatedAt: number;
+};
+```
+
+The model keeps only a reference: `ChannelModel.scriptId?: string`, replacing `script?: string`. The project is not released, so the structure is replaced directly with no compatibility branch; existing non-empty `script` values are treated as unreferenced on read.
+
+## Save
+
+- Actions: `saveScript(input)`, `deleteScript(id)`, `duplicateScript(id)`.
+- Validation before writing: non-empty `name`, valid `capability`, non-empty `code` that passes precompilation.
+- Storage split: the config store keeps a light index (`id` / `name` / `capability` / `updatedAt`); script bodies go to localforage, decoupled from `apiKey`.
+- Cost: `resolveModelScript` becomes asynchronous, so the five call sites must `await`.
+
+Alternative: keep script bodies inside the config store and read them synchronously, which requires no call-site changes but retains the quota and key-coupling risks.
+
+## Query
+
+```ts
+listScripts(filter?: { capability?: ModelCapability; keyword?: string }): ModelScript[];
+getScript(id: string): ModelScript | undefined;
+resolveScriptForModel(config: AiConfig, modelValue: string): Promise<string>;
+```
+
+Built-in templates from `getPluginTemplates` stay read-only sources and are written to the library only through an explicit "save as script" action.
+
+## Invoke
+
+`runModelPlugin` remains the only execution entry point, with two additions:
+
+1. **Precompile on save**: wrap the script in an empty async body with `new Function` to surface syntax errors in the editor.
+2. **Run-time timeout**: `Promise.race` with an `AbortSignal`, reported as `AbortError` to match existing cancellation handling. Any default timeout is a behavior-changing boundary and must be confirmed before implementation.
+
+Return validation is unified per capability: image → `string[]` via `normalizePluginImages`; video → `{ url: string }` or `Blob`; audio → `Blob` or `{ data: string }`; text → `string`.
+
+## UI
+
+- `app-config-modal.tsx`: add the `model-script` tab.
+- New `web/src/components/layout/config-model-scripts.tsx`: script list on the left (capability filter, keyword search, create / duplicate / delete, mounted-model count), editor on the right.
+- `model-script-editor.tsx`: becomes a controlled component that no longer knows about a model.
+- `channel-editor-drawer.tsx`: each model row gets a script selector plus an edit button.
+
+## Affected files
+
+`use-config-store.ts`, new `use-model-script-store.ts` with a localforage wrapper, three call sites in `image.ts`, plus `video.ts` and `audio.ts`, `model-plugin.ts`, `app-config-modal.tsx`, `channel-editor-drawer.tsx`, and `model-script-editor.tsx`.
+
+## Phases
+
+1. **P1**: script entity, config-page list, model-to-script selection, call sites switched over.
+2. **P2**: precompilation, execution timeout, unified return validation.
+3. **P3**: save built-in templates into the library, duplicate and rename, mounted-model listing.
+
+## Risks
+
+- **Async conversion is the largest surface**: script lookup becomes asynchronous across image, video, audio, and text paths, each needing regression coverage.
+- **Scripts still run on the main thread** with access to `window` and the network. `apiKey` is already injected by design, so the trust boundary belongs to the user; real isolation would require a Worker or iframe.
+- **Two persistence layers** must stay consistent: clear references before deleting a script body, and treat a dangling `scriptId` as "no script" and fall back to the built-in call instead of failing generation.

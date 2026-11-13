@@ -1,0 +1,14 @@
+{
+  "title": "Project Progress",
+  "root": true,
+  "defaultOpen": true,
+  "pages": [
+    "[Changelog](/docs/progress/changelog)",
+    "local-agent-integration-plan",
+    "prompt-chip-input-plan",
+    "model-script-library-plan",
+    "model-template-data-plan",
+    "pending-test",
+    "todo"
+  ]
+}

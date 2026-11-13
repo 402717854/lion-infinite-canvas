@@ -1,0 +1,128 @@
+---
+title: 模型调用脚本库规划
+description: 把模型调用脚本从「模型附带文本」升级为可保存、可查询、可调用的独立脚本实体
+---
+
+# 模型调用脚本库规划
+
+## 背景
+
+项目已经支持「用户自定义模型调用脚本」：为某个模型写一段 JavaScript，生成时用它替代内置的 API 实现。当前实现是**脚本直接挂在模型上**，三条链路都已打通：
+
+| 环节 | 位置 | 现状 |
+| --- | --- | --- |
+| 数据结构 | `web/src/stores/use-config-store.ts` | `ChannelModel.script?: string` |
+| 保存 | `use-config-store.ts` 的 `persist` | 随配置整包写入 localStorage 的 `infinite-canvas:ai_config_store`，与 `apiKey` 同键 |
+| 查询 | `use-config-store.ts` 的 `resolveModelScript` | 按 `channelId::model` 定位模型后取 `script.trim()`，同步、仅支持按模型查 |
+| 调用 | `web/src/services/api/model-plugin.ts` 的 `runModelPlugin` | `new Function` 注入 `prompt` / `messages` / `model` / `baseUrl` / `apiKey` / `http` / `request` / `poll` / `signal` / `onDelta` 等变量执行 |
+| 入口 | `image.ts`、`video.ts`、`audio.ts` | 先查脚本，有脚本走脚本，无脚本走内置实现 |
+
+`ConfigTabKey` 中的 `"model-script"` 与 `config.tabs.modelScript` 文案已存在，但 `app-config-modal.tsx` 没有渲染对应面板，属于未接通的预留入口。
+
+## 当前缺口
+
+1. **保存**：脚本与模型一对一强绑定。同一份 OpenAI 兼容脚本要复用到三个模型，只能复制三份；缺少名称、能力、说明、更新时间等元数据；正文与 `apiKey` 存在同一个 localStorage 键里，体积增长时有配额风险。
+2. **查询**：没有列表能力。用户只能进渠道抽屉逐个模型点开编辑器，无法按能力筛选、按关键字检索，也无法知道哪些模型已配置脚本。
+3. **调用**：保存时不校验语法；执行无超时上限；返回值形状只由调用点各自判断（仅图片有 `normalizePluginImages`）。
+
+## 目标
+
+- 脚本成为独立实体：可命名、可复用、可跨模型与跨渠道引用。
+- 提供统一查询面：按能力筛选、按名称检索、查看已挂载模型。
+- 调用仍然只有一个执行入口，并补上保存期与运行期约束。
+
+非目标（本轮不做）：
+
+- 脚本市场、云端共享、版本历史。
+- Worker / iframe 级沙箱隔离。
+
+## 数据结构
+
+新增 `web/src/stores/use-model-script-store.ts`：
+
+```ts
+type ModelScript = {
+  id: string;
+  name: string;
+  capability: ModelCapability; // 决定可用变量集合与返回值形状
+  description?: string;
+  code: string;
+  updatedAt: number;
+};
+```
+
+模型侧只保留引用，`ChannelModel` 改为：
+
+```ts
+type ChannelModel = {
+  name: string;
+  capability: ModelCapability;
+  scriptId?: string; // 替代原 script?: string
+};
+```
+
+项目尚未上线，按项目约定直接替换结构，不为 `script` 字段写兼容分支；本地已有配置在读取时把非空 `script` 视为无引用，不做自动迁移。
+
+## 保存
+
+- store action：`saveScript(input)`、`deleteScript(id)`、`duplicateScript(id)`。
+- 写入前校验：`name` 非空、`capability` 合法、`code` 非空且能通过预编译（见「调用」）。
+- 存储分层：
+  - 配置 store 只保留轻量索引（`id` / `name` / `capability` / `updatedAt`），随现有 `persist` 走。
+  - 脚本正文写入 localforage（项目约定：业务数据默认 localforage，localStorage 只放极小配置），与 `apiKey` 解耦。
+- 代价：`resolveModelScript` 从同步变异步，五个调用点需要 `await`。
+
+备选方案：正文继续留在配置 store 内同步读取，调用点零改动，但保留配额与密钥耦合风险。两种方案的取舍见「风险与取舍」。
+
+## 查询
+
+```ts
+listScripts(filter?: { capability?: ModelCapability; keyword?: string }): ModelScript[];
+getScript(id: string): ModelScript | undefined;
+resolveScriptForModel(config: AiConfig, modelValue: string): Promise<string>;
+```
+
+内置模板（`getPluginTemplates`）保持只读来源，不写入脚本库；用户在编辑器点击「另存为脚本」才落库。
+
+## 调用
+
+`runModelPlugin` 仍是唯一执行入口，新增两道约束：
+
+1. **保存期预编译**：用 `new Function` 包一层空执行体，只捕获语法错误，在编辑器内即时提示。
+2. **运行期超时**：`Promise.race` + `AbortSignal`，超时后按 `AbortError` 处理，与现有取消逻辑一致。超时默认值属于会改变实际行为的边界值，落地前需先确认后再写入。
+
+返回值校验统一按 capability 收口：
+
+| capability | 期望返回值 |
+| --- | --- |
+| image | `string[]`（URL 或 data URL），复用 `normalizePluginImages` |
+| video | `{ url: string }` 或 `Blob` |
+| audio | `Blob` 或 `{ data: string }` |
+| text | `string` |
+
+## UI 落点
+
+- `app-config-modal.tsx`：补上 `model-script` tab。
+- 新增 `web/src/components/layout/config-model-scripts.tsx`：左侧为脚本列表（能力筛选、关键字搜索、新建 / 复制 / 删除、显示挂载模型数），右侧复用 `ModelScriptEditor`。
+- `model-script-editor.tsx`：从「绑定单个模型」改为受控组件（接收 `capability` 与 `value`，不感知模型），入口区别在于回写目标。
+- `channel-editor-drawer.tsx`：模型行改为「选择脚本」下拉 + 「编辑」按钮。
+
+## 改造清单
+
+- `use-config-store.ts`：`ChannelModel.script` → `scriptId`；`resolveModelScript` → `resolveScriptForModel`。
+- 新增 `use-model-script-store.ts` 与 localforage 读写封装。
+- `image.ts`（三处）、`video.ts`、`audio.ts`：取脚本改为异步并 await。
+- `model-plugin.ts`：新增编译校验与超时包装。
+- `app-config-modal.tsx`、`channel-editor-drawer.tsx`、`model-script-editor.tsx`。
+
+## 分阶段
+
+1. **P1 最小闭环**：脚本实体 + 配置页列表 + 模型选择脚本 + 五处调用点切换。
+2. **P2 执行约束**：语法预编译、执行超时、返回值统一校验。
+3. **P3 体验补充**：从内置模板一键另存为脚本、脚本复制与重命名、显示脚本挂载的模型清单。
+
+## 风险与取舍
+
+- **异步化是最大改动面**：取脚本从同步变异步，改动分散在生成链路上，需要逐个回归图片、视频、音频、文本四条路径。若优先保证改动可控，可选备选方案（正文留在 localStorage）。
+- **脚本仍在浏览器主线程执行**，可访问 `window` 与网络。当前设计本就向脚本注入 `apiKey`，信任边界由用户自担；真要隔离需改为 Worker 或 iframe，成本与兼容代价都不低。
+- **localforage 与配置 store 存在两套持久化时机**，删除脚本时需先清引用再删正文，避免模型指向空 id。引用失效时按「无脚本」处理并回落到内置实现，不报错阻断生成。

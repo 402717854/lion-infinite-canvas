@@ -1,0 +1,146 @@
+---
+title: 模型调用模板数据化方案
+description: 把 model-plugin.ts 里的内置模板脚本从 TS 字符串字面量改为独立文本文件，构建期以原始字符串加载
+---
+
+# 模型调用模板数据化方案
+
+## 结论
+
+把 8 段内置模板正文从 `model-plugin.ts` 的模板字符串中移出，落到 `model-templates/` 目录下的独立文本文件，构建期用 Vite `?raw` 以原始字符串加载；文件名承载 `capability` 与 `provider` 元数据。`getPluginTemplates()` 的返回结构保持不变，编辑器与 AI 授权提示词两处调用点零改动。
+
+## 现状
+
+位置：`web/src/services/api/model-plugin.ts`，`getPluginTemplates` 占 `226–992` 行。
+
+- 文件共 992 行，其中 767 行是模板正文（约 77%），合计约 20 KB。
+- 8 段模板：`image` / `video` / `audio` / `text` 四种能力，各含 OpenAI 与 Gemini 两份。
+- 为塞进模板字符串，正文里有 **74 处人工转义**：42 处反引号、30 处 `${`、2 处正则反斜杠。写模板时每写一个模板字符串都要多敲一层反斜杠，改错就是运行期报错。
+- 模板正文本质是**函数体片段**（末尾 `return await generateXxx(...)`），不是合法 ES 模块，不能直接当 `.js` 模块导入。
+- label 依赖 i18n 键 `modelPlugin.templates.openai` / `modelPlugin.templates.gemini`。
+- 新增一个 provider 模板必须改 TS 源码，无法只靠数据文件扩展。
+
+## 目标
+
+1. 模板正文脱离 TS，编辑模板不再需要转义。
+2. 新增模板 = 新增一个文件，不改任何 TS 逻辑代码。
+3. `getPluginTemplates()` 对外契约不变，`model-script-editor.tsx` 与 `getPluginAuthoringPrompt` 不用改。
+4. 保持构建期打包，不引入运行时网络请求。
+
+非目标：
+
+- 用户运行时自定义模板（属于[模型调用脚本库规划](/zh-CN/docs/progress/model-script-library-plan) 的 P3，两者共用同一份脚本数据，不在本方案内重复实现）。
+- 模板正文按界面语言切换。正文统一保留英文注释，只有 label 走 i18n。
+
+## 方案：文件即配置
+
+### 目录布局
+
+```
+web/src/services/api/model-templates/
+├── image.openai.js
+├── image.gemini.js
+├── video.openai.js
+├── video.gemini.js
+├── audio.openai.js
+├── audio.gemini.js
+├── text.openai.js
+├── text.gemini.js
+└── index.ts          # 约 20 行：glob 加载 + 元数据推导
+```
+
+文件名格式固定为 `<capability>.<provider>.js`，文件内容就是脚本原文，**去掉全部转义**：`\`` → `` ` ``、`\${` → `${`、`\\d` → `\d`。
+
+### 加载
+
+```ts
+const files = import.meta.glob("./model-templates/*.js", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+```
+
+`eager: true` 在构建期把文本内联为字符串常量，运行时零请求、零异步。文件顺序由 glob 保证稳定，按文件名排序后与现有模板顺序一致（image openai → gemini，依此类推）。
+
+### 元数据推导
+
+不额外维护清单文件，避免清单与文件双份漂移：
+
+```ts
+function templateFromPath(path: string, script: string): PluginTemplate {
+  const [capability, provider] = path.split("/").pop()!.replace(/\.js$/, "").split(".");
+  return {
+    id: `${capability}.${provider}`,
+    label: i18n.t(`modelPlugin.templates.${provider}`, { defaultValue: provider }),
+    script,
+  };
+}
+```
+
+`capability` 直接作为分组键，`provider` 决定 label 的 i18n 键，缺失时回退为 provider 原名。
+
+### 返回类型
+
+```ts
+export type PluginTemplate = { id: string; label: string; script: string };
+```
+
+`label` 与 `script` 保持原字段名，新增的 `id` 是附加信息（后续脚本库以它为「另存为」的来源标识）。现有调用点只读 `label` / `script`，因此不受影响。
+
+### 调用点改动
+
+| 位置 | 改动 |
+| --- | --- |
+| `model-plugin.ts` | 删除 `getPluginTemplates` 函数体与 `PluginTemplate` 定义，改为从 `./model-templates` 重新导出，保持原有 import 路径可用 |
+| `model-script-editor.tsx:43` | 无 |
+| `model-plugin.ts:211`（`getPluginAuthoringPrompt`） | 无 |
+| i18n | 无新增键；若后续加 provider，需补 `modelPlugin.templates.<provider>` |
+
+## 工具链约束
+
+这三点决定文件后缀怎么选，是方案能落地的前提：
+
+1. **prettier 会解析失败**。模板文件末尾是顶层 `return`，prettier 按 ES 模块解析会直接报错，`prettier --check .` 会红。必须在 `.prettierignore` 增加 `src/services/api/model-templates/`。
+2. **tsc 不检查**。`tsconfig.json` 的 `include` 只有 `src/**/*.ts` 与 `src/**/*.tsx`，虽然 `allowJs: true`，但 `.js` 模板不在检查范围内，不会因为引用未定义变量（`model`、`baseUrl`）报错。
+3. **`?raw` 类型已就绪**。`src/vite-env.d.ts` 已 `/// <reference types="vite/client" />`，无需新增声明。
+
+## 备选方案对比
+
+| 方案 | 正文形态 | 优点 | 缺点 | 结论 |
+| --- | --- | --- | --- | --- |
+| `.js` + `?raw` + prettier 忽略 | 独立文件，保留高亮 | 无转义、可读、可 diff、零运行时 | 需一条 prettier 忽略规则 | **推荐** |
+| `.txt` / `.js.txt` | 独立文件 | 工具链零干扰 | 编辑器无 JS 高亮，模板维护体验下降 | 备选 |
+| JSON 清单 + 正文 | 清单 + 文件 | 元数据可显式声明 | 清单与文件需同步维护，容易漂移 | 不采纳 |
+| `public/templates` + `fetch` | 运行时静态资源 | 可热更新，无需重新构建 | 引入异步加载、失败分支与部署路径耦合 | 不采纳 |
+| Markdown + frontmatter | 单文件含元数据 | 元数据与正文同处 | 需解析 frontmatter，多一层实现 | 不采纳 |
+
+## 打包影响
+
+模板约 20 KB 文本。`model-plugin.ts` 被 `image.ts` / `video.ts` / `audio.ts` 引用，即生成链路本身，`eager` 加载会把这段文本带进主链路 chunk。
+
+- 若接受：改动最小，`getPluginTemplates()` 保持同步，本方案一次完成。
+- 若在意首屏：把 `model-templates/index.ts` 改为非 eager，导出 `loadPluginTemplates(): Promise<...>`，整份模板只在编辑器打开时加载。代价是 `getPluginTemplates` 与 `getPluginAuthoringPrompt` 变异步，编辑器需要 loading 态。
+
+建议先按同步实现（单一改动点、风险最低），体积成为实际问题时再做异步化，届时只需改 `index.ts` 的加载方式与两处调用点。
+
+## 实施步骤
+
+1. 新建 `model-templates/` 目录，按现有 8 段正文逐段落文件，去掉 74 处转义。
+2. 新建 `index.ts`：glob 加载、按 `capability` 分组、按文件名排序、拼装 `PluginTemplate[]`。
+3. `model-plugin.ts` 删除模板区（`224–972` 行）与 `PluginTemplate` 定义，改为 re-export。
+4. `.prettierignore` 增加模板目录。
+5. 用脚本逐段比对：旧实现 `getPluginTemplates()` 的输出与新实现的输出字符串完全一致（转义已在运行时还原，两边应当逐字符相等）。
+
+## 验证
+
+- 编辑器四个能力的模板按钮数量与顺序不变，共 8 个。
+- 逐个点击模板，插入编辑器的内容与旧实现一致（重点看 OpenAI 模板里的 `` `${baseUrl}/v1/...` `` 与 Gemini 模板里的 `\d+` 正则）。
+- 「复制授权提示词」中「完整示例」段落与旧输出一致。
+- 构建产物无新增运行时请求；首屏包体增量在预期内。
+
+## 风险
+
+- **转义还原出错是最主要的风险**：漏改一处 `` \` `` 就会让模板变成非法脚本，且不会在编译期暴露。用第 5 步的字符串比对兜底，比人工肉眼检查可靠。
+- **文件名是隐式契约**：改名等于改 id 与能力分组。约定在 `index.ts` 只接受 `<capability>.<provider>` 形式，不匹配的文件不注册（静默跳过，不做兜底解析）。
+- **模板不再受 prettier 统一格式化**：风格一致性由提交时人工保证，可接受；若需要，后续用单独脚本对函数体做格式化。
