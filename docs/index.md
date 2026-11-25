@@ -8,6 +8,7 @@
 - [部署](deployment.md)：Docker、源码构建、Vercel、Render、canvas-api + PostgreSQL 全栈
 - [待办](todo.md)：后续要做的事
 - [待测试](pending-test.md)：已实现但仍需人工验证的清单
+- [模型管理 M3](model-management.md)：渠道、模型、授权配额、网关与用量的需求文档（待确认）
 
 ## 相关文档
 
