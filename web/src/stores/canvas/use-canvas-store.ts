@@ -12,6 +12,13 @@ export type CanvasProject = {
     title: string;
     createdAt: string;
     updatedAt: string;
+    workspaceId?: string;
+    version?: number;
+    ownerId?: string;
+    ownerName?: string;
+    visibility?: "private" | "workspace" | "link";
+    thumbnailUrl?: string | null;
+    collaboratorCount?: number;
     nodes: CanvasNodeData[];
     connections: CanvasConnection[];
     chatSessions: CanvasAssistantSession[];
@@ -37,6 +44,8 @@ type CanvasStore = {
     deleteProjects: (ids: string[]) => void;
     replaceProjects: (projects: CanvasProject[], deletedProjects?: CanvasDeletedProject[]) => void;
     updateProject: (id: string, patch: Partial<Pick<CanvasProject, "nodes" | "connections" | "chatSessions" | "activeChatId" | "backgroundMode" | "showImageInfo" | "viewport">>) => void;
+    replaceWorkspaceProjects: (workspaceId: string, projects: CanvasProject[]) => void;
+    setProjectVersion: (id: string, version: number) => void;
 };
 
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
@@ -129,6 +138,9 @@ export const useCanvasStore = create<CanvasStore>()(
                 set((state) => ({
                     projects: state.projects.map((project) => (project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project)),
                 })),
+            replaceWorkspaceProjects: (workspaceId, projects) =>
+                set((state) => ({ projects: [...state.projects.filter((project) => project.workspaceId !== workspaceId), ...projects] })),
+            setProjectVersion: (id, version) => set((state) => ({ projects: state.projects.map((project) => (project.id === id ? { ...project, version } : project)) })),
         }),
         {
             name: CANVAS_STORE_KEY,

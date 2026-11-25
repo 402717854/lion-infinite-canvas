@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Group, Video } from "lucide-react";
+import { Eye, Group, Video } from "lucide-react";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -44,6 +44,10 @@ import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { useWorkspaceAccess } from "@/hooks/use-workspace-access";
+import { addCloudProject, useWorkspaceProjects } from "@/hooks/use-workspace-projects";
+import { apiErrorMessage } from "@/services/api/client";
+import { projectApi } from "@/services/api/team";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -171,10 +175,17 @@ function InfiniteCanvasPage() {
     const { t } = useTranslation();
     // Subscribe to the registry version so plugin registration changes rerender the canvas.
     const nodeRegistryVersion = useNodeRegistryVersion((state) => state.version);
-    const params = useParams<{ id: string }>();
+    const params = useParams<{ id: string; wsId?: string }>();
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
+    const wsId = params.wsId || "";
     const projectId = params.id || "";
+    const { can } = useWorkspaceAccess(wsId);
+    const readOnly = Boolean(wsId) && !can("project.update");
+    const workspaceListPath = wsId ? `/w/${wsId}` : "/canvas";
+    const { loading: cloudLoading } = useWorkspaceProjects(wsId);
+    const readOnlyRef = useRef(readOnly);
+    readOnlyRef.current = readOnly;
     const localAgentConnected = useAgentStore((state) => state.connected);
     const localAgentActivity = useAgentStore((state) => state.activity);
     const localAgentEnabled = useAgentStore((state) => state.enabled);
@@ -438,11 +449,15 @@ function InfiniteCanvasPage() {
     );
 
     useEffect(() => {
-        if (!hydrated) return;
+        if (!hydrated || cloudLoading) return;
         setProjectLoaded(false);
         const project = openProject(projectId);
         if (!project) {
-            navigate("/canvas", { replace: true });
+            navigate(workspaceListPath, { replace: true });
+            return;
+        }
+        if (project.workspaceId && project.workspaceId !== wsId) {
+            navigate(`/w/${project.workspaceId}/canvas/${project.id}`, { replace: true });
             return;
         }
 
@@ -473,7 +488,7 @@ function InfiniteCanvasPage() {
             setProjectLoaded(true);
         };
         void restore();
-    }, [hydrated, navigate, openProject, projectId]);
+    }, [cloudLoading, hydrated, navigate, openProject, projectId, workspaceListPath, wsId]);
 
     useEffect(() => {
         if (!projectLoaded) return;
@@ -522,16 +537,16 @@ function InfiniteCanvasPage() {
     }, [activeChatId, backgroundMode, chatSessions, connections, createHistoryEntry, nodes, projectLoaded, showImageInfo]);
 
     useEffect(() => {
-        if (!projectLoaded || historyPausedRef.current) return;
+        if (!projectLoaded || readOnly || historyPausedRef.current) return;
         updateProject(projectId, { nodes, connections, chatSessions, activeChatId, backgroundMode, showImageInfo });
-    }, [activeChatId, backgroundMode, chatSessions, connections, nodes, projectId, projectLoaded, showImageInfo, updateProject]);
+    }, [activeChatId, backgroundMode, chatSessions, connections, nodes, projectId, projectLoaded, readOnly, showImageInfo, updateProject]);
 
     useEffect(() => {
         if (!dialogNodeId) setNodeImageSettingsOpen(false);
     }, [dialogNodeId]);
 
     useEffect(() => {
-        if (!projectLoaded) return;
+        if (!projectLoaded || readOnly) return;
         if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
         viewportSaveTimerRef.current = setTimeout(() => {
             updateProject(projectId, { viewport: viewportRef.current });
@@ -540,7 +555,7 @@ function InfiniteCanvasPage() {
         return () => {
             if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
         };
-    }, [projectId, projectLoaded, updateProject, viewport]);
+    }, [projectId, projectLoaded, readOnly, updateProject, viewport]);
 
     useLayoutEffect(() => {
         nodesRef.current = nodes;
@@ -610,7 +625,7 @@ function InfiniteCanvasPage() {
 
     const connectNodes = useCallback(
         (current: ConnectionHandle, targetNodeId: string) => {
-            if (current.nodeId === targetNodeId) return;
+            if (readOnlyRef.current || current.nodeId === targetNodeId) return;
 
             const connection = normalizeConnection(current.nodeId, targetNodeId, nodesRef.current, current.handleType);
             if (!connection) {
@@ -629,6 +644,7 @@ function InfiniteCanvasPage() {
 
     const createConnectedNode = useCallback(
         (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio, pending: PendingConnectionCreate) => {
+            if (readOnlyRef.current) return;
             const metadata = type === CanvasNodeType.Config ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count) } : undefined;
             const newNode = createCanvasNode(type, pending.position, metadata);
             const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...nodesRef.current, newNode], pending.connection.handleType);
@@ -831,6 +847,7 @@ function InfiniteCanvasPage() {
     });
     const createNode = useCallback(
         (type: CanvasNodeTypeId, position?: Position) => {
+            if (readOnlyRef.current) return;
             const targetPosition = position || getCanvasCenter();
             const configMetadata =
                 type === CanvasNodeType.Config
@@ -863,7 +880,7 @@ function InfiniteCanvasPage() {
 
     const deleteNodes = useCallback(
         (ids: Set<string>) => {
-            if (!ids.size) return;
+            if (readOnlyRef.current || !ids.size) return;
             const allIds = new Set(ids);
             setNodes((prev) => {
                 const next = prev.filter((node) => !allIds.has(node.id));
@@ -894,6 +911,7 @@ function InfiniteCanvasPage() {
     );
 
     const groupSelection = useCallback(() => {
+        if (readOnlyRef.current) return;
         const selectedIds = selectedNodeIdsRef.current;
         const members = collectGroupMemberNodes(selectedIds, nodesRef.current);
         if (members.length < 2) return;
@@ -911,6 +929,7 @@ function InfiniteCanvasPage() {
     }, []);
 
     const ungroupSelection = useCallback((ids?: Set<string>) => {
+        if (readOnlyRef.current) return;
         const result = applyUngroupSelection(ids || selectedNodeIdsRef.current, nodesRef.current, connectionsRef.current);
         if (!result) return;
         setNodes(result.nodes);
@@ -923,6 +942,7 @@ function InfiniteCanvasPage() {
     }, []);
 
     const deleteConnection = useCallback((connectionId: string) => {
+        if (readOnlyRef.current) return;
         setConnections((prev) => prev.filter((conn) => conn.id !== connectionId));
         setSelectedConnectionId((current) => (current === connectionId ? null : current));
         setContextMenu((current) => (current?.type === "connection" && current.connectionId === connectionId ? null : current));
@@ -977,6 +997,7 @@ function InfiniteCanvasPage() {
     }, [cancelPendingConnectionCreate]);
 
     const clearCanvas = useCallback(() => {
+        if (readOnlyRef.current) return;
         setNodes([]);
         setConnections([]);
         setInfoNodeId(null);
@@ -991,6 +1012,7 @@ function InfiniteCanvasPage() {
     }, [cleanupCanvasFiles, deselectCanvas, projectId]);
 
     const duplicateNode = useCallback((nodeId: string) => {
+        if (readOnlyRef.current) return;
         const source = nodesRef.current.find((node) => node.id === nodeId);
         if (!source) return;
 
@@ -1031,6 +1053,7 @@ function InfiniteCanvasPage() {
     }, []);
 
     const pasteCopiedNodes = useCallback(() => {
+        if (readOnlyRef.current) return false;
         const clipboard = clipboardRef.current;
         if (!clipboard?.nodes.length) return false;
 
@@ -1186,15 +1209,43 @@ function InfiniteCanvasPage() {
     }, [applyHistory]);
 
     const createAndOpenProject = useCallback(() => {
+        if (readOnlyRef.current) return;
+        if (wsId) {
+            void (async () => {
+                try {
+                    const created = (await projectApi.create(wsId, { title: "未命名项目", visibility: "workspace" })) as { project?: { id: string } } | { id: string };
+                    const projectIdNext = "project" in created && created.project ? created.project.id : (created as { id: string }).id;
+                    const detail = await projectApi.detail(projectIdNext);
+                    addCloudProject(detail.project, wsId);
+                    navigate(`/w/${wsId}/canvas/${projectIdNext}`);
+                } catch (error) {
+                    message.error(apiErrorMessage(error));
+                }
+            })();
+            return;
+        }
         const id = createProject(t("canvas.defaultTitle", { count: useCanvasStore.getState().projects.length + 1 }));
         navigate(`/canvas/${id}`);
-    }, [createProject, navigate, t]);
+    }, [createProject, message, navigate, t, wsId]);
 
     const deleteCurrentProject = useCallback(() => {
+        if (readOnlyRef.current) return;
+        if (wsId) {
+            void (async () => {
+                try {
+                    await projectApi.remove(projectId);
+                    deleteProjects([projectId]);
+                    navigate(`/w/${wsId}`, { replace: true });
+                } catch (error) {
+                    message.error(apiErrorMessage(error));
+                }
+            })();
+            return;
+        }
         deleteProjects([projectId]);
         cleanupAssetImages();
         navigate("/canvas");
-    }, [cleanupAssetImages, deleteProjects, navigate, projectId]);
+    }, [cleanupAssetImages, deleteProjects, message, navigate, projectId, wsId]);
 
     const exportCurrentProject = useCallback(async () => {
         const project = useCanvasStore.getState().projects.find((item) => item.id === projectId);
@@ -1276,6 +1327,11 @@ function InfiniteCanvasPage() {
 
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.stopPropagation();
+        if (readOnlyRef.current) {
+            selectNodeByEvent(event, nodeId);
+            pendingSelectionRef.current = null;
+            return;
+        }
         // Capture already selected the node; this only starts dragging, with a fallback selection if capture did not run.
         const currentNodes = nodesRef.current;
         const nextSelected = pendingSelectionRef.current ?? selectNodeByEvent(event, nodeId).nextSelected;
@@ -1583,6 +1639,7 @@ function InfiniteCanvasPage() {
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
             if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]")) return;
+            if (readOnlyRef.current) return;
 
             const key = event.key.toLowerCase();
             const isModifierShortcut = event.metaKey || event.ctrlKey;
@@ -1680,6 +1737,7 @@ function InfiniteCanvasPage() {
     );
 
     const handleNodeResize = useCallback((nodeId: string, width: number, height: number, position?: Position) => {
+        if (readOnlyRef.current) return;
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, width, height, position: position || node.position } : node)));
     }, []);
 
@@ -1702,6 +1760,7 @@ function InfiniteCanvasPage() {
     }, []);
 
     const handleNodeContentChange = useCallback((nodeId: string, content: string) => {
+        if (readOnlyRef.current) return;
         setNodes((prev) =>
             prev.map((node) =>
                 node.id === nodeId
@@ -1712,6 +1771,7 @@ function InfiniteCanvasPage() {
     }, []);
 
     const handleNodeTitleChange = useCallback((nodeId: string, title: string) => {
+        if (readOnlyRef.current) return;
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, title } : node)));
     }, []);
 
@@ -1756,6 +1816,7 @@ function InfiniteCanvasPage() {
     }, []);
 
     const duplicateBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
+        if (readOnlyRef.current) return;
         const image = node.metadata?.images?.find((item) => item.id === imageId);
         if (!image?.content) return;
         const id = nanoid();
@@ -1811,6 +1872,7 @@ function InfiniteCanvasPage() {
 
     const captureVideoNodeFrame = useCallback(
         async (nodeId: string, position: VideoFramePosition) => {
+            if (readOnlyRef.current) return;
             setContextMenu(null);
             const node = nodesRef.current.find((item) => item.id === nodeId);
             const video = Array.from(containerRef.current!.querySelectorAll<HTMLVideoElement>("video[data-canvas-video]")).find((item) => item.dataset.canvasVideo === nodeId);
@@ -1891,6 +1953,7 @@ function InfiniteCanvasPage() {
 
     const createImageReversePromptNodes = useCallback(
         (node: CanvasNodeData) => {
+            if (readOnlyRef.current) return;
             if (node.type !== CanvasNodeType.Image || !node.metadata?.content) {
                 message.warning(t("canvas.projectPage.emptyReverse"));
                 return;
@@ -2141,16 +2204,22 @@ function InfiniteCanvasPage() {
     );
 
     const handleFontSizeChange = useCallback((nodeId: string, fontSize: number) => {
+        if (readOnlyRef.current) return;
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, fontSize } } : node)));
     }, []);
 
     const handleUploadRequest = useCallback((nodeId?: string, position?: Position) => {
+        if (readOnlyRef.current) return;
         uploadTargetRef.current = { nodeId, position };
         imageInputRef.current?.click();
     }, []);
 
     const handleImageInputChange = useCallback(
         async (event: ReactChangeEvent<HTMLInputElement>) => {
+            if (readOnlyRef.current) {
+                event.target.value = "";
+                return;
+            }
             const files = Array.from(event.target.files || []).filter(
                 (f) => f.type.startsWith("image/") || f.type.startsWith("video/") || isAudioFile(f),
             );
@@ -2284,6 +2353,7 @@ function InfiniteCanvasPage() {
     const handleDrop = useCallback(
         (event: ReactDragEvent<HTMLDivElement>) => {
             event.preventDefault();
+            if (readOnlyRef.current) return;
             const files = Array.from(event.dataTransfer.files).filter(
                 (item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item),
             );
@@ -2325,6 +2395,7 @@ function InfiniteCanvasPage() {
 
     const handleGenerateNode = useCallback(
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
+            if (readOnlyRef.current) return;
             const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
             const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
@@ -2767,6 +2838,7 @@ function InfiniteCanvasPage() {
 
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData, imageId?: string) => {
+            if (readOnlyRef.current) return;
             if (hasResumableVideoTask(node)) {
                 await pollVideoNodeTask(node);
                 return;
@@ -2920,6 +2992,7 @@ function InfiniteCanvasPage() {
     );
 
     const deleteBatchImage = useCallback((nodeId: string, imageId: string) => {
+        if (readOnlyRef.current) return;
         const node = nodesRef.current.find((item) => item.id === nodeId);
         if ((node?.metadata?.images?.length || 0) <= 2) setExpandedBatchNodeIds((current) => new Set([...current].filter((id) => id !== nodeId)));
         setNodes((prev) =>
@@ -3013,6 +3086,7 @@ function InfiniteCanvasPage() {
 
     const handleAssetInsert = useCallback(
         (payload: InsertAssetPayload) => {
+            if (readOnlyRef.current) return;
             if (payload.kind === "text") {
                 insertAssistantText(payload.content, payload.title);
             } else if (payload.kind === "video") {
@@ -3069,6 +3143,7 @@ function InfiniteCanvasPage() {
     const handleNodeContextMenu = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.preventDefault();
         event.stopPropagation();
+        if (readOnlyRef.current) return;
         setSelectedNodeIds((current) => (current.has(nodeId) ? current : new Set([nodeId])));
         setSelectedConnectionId(null);
         setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId });
@@ -3155,20 +3230,20 @@ function InfiniteCanvasPage() {
 
     return (
         <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
-            <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onHoverNode={setHoverPreviewNodeId} onInsertAsset={handleAssetInsert} />
+            {readOnly ? null : <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onHoverNode={setHoverPreviewNodeId} onInsertAsset={handleAssetInsert} />}
             <section className="relative min-w-0 flex-1 overflow-hidden">
                 <CanvasTopBar
                     title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
                     titleDraft={titleDraft}
                     isTitleEditing={titleEditing}
                     onTitleDraftChange={setTitleDraft}
-                    onStartTitleEditing={startTitleEditing}
+                    onStartTitleEditing={() => !readOnly && startTitleEditing()}
                     onFinishTitleEditing={finishTitleEditing}
                     onCancelTitleEditing={() => setTitleEditing(false)}
                     canUndo={historyState.canUndo}
                     canRedo={historyState.canRedo}
-                    onHome={() => navigate("/")}
-                    onProjects={() => navigate("/canvas")}
+                    onHome={() => navigate(wsId ? workspaceListPath : "/")}
+                    onProjects={() => navigate(workspaceListPath)}
                     onCreateProject={createAndOpenProject}
                     onDeleteProject={deleteCurrentProject}
                     onExportProject={exportCurrentProject}
@@ -3179,7 +3254,15 @@ function InfiniteCanvasPage() {
                     agentOpen={agentPanelOpen}
                     compactAgentStatus={{ connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity }}
                     onToggleAgent={toggleAgentPanel}
+                    readOnly={readOnly}
                 />
+
+                {readOnly ? (
+                    <div className="pointer-events-none absolute left-1/2 top-16 z-[70] flex -translate-x-1/2 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}>
+                        <Eye className="size-3.5" />
+                        你是查看者 · 修改不会保存
+                    </div>
+                ) : null}
 
                 <InfiniteCanvas
                     containerRef={containerRef}
@@ -3195,7 +3278,7 @@ function InfiniteCanvasPage() {
                     }}
                     onCanvasDeselect={referencePickerNodeId ? undefined : deselectCanvas}
                     onCanvasDoubleClick={(event) => {
-                        if (referencePickerNodeId) return;
+                        if (referencePickerNodeId || readOnly) return;
                         setContextMenu(null);
                         setNodeCreatePosition(screenToCanvas(event.clientX, event.clientY));
                     }}
@@ -3236,7 +3319,7 @@ function InfiniteCanvasPage() {
                             isConnectionTarget={connectionTargetNodeId === node.id}
                             isConnecting={Boolean(connectingParams)}
                             referenceSelectionState={!referencePickerNodeId ? undefined : node.id === referencePickerNodeId ? "target" : referenceConnectedNodeIds.has(node.id) || !isCanvasReferenceNode(node, nodes) ? "disabled" : "available"}
-                            showPanel={!isNodeResizing && dialogNodeId === node.id && !selectionBox && !getNodeDefinition(node.type)?.hidePanel}
+                            showPanel={!readOnly && !isNodeResizing && dialogNodeId === node.id && !selectionBox && !getNodeDefinition(node.type)?.hidePanel}
                             groupChildCount={groupChildCountById.get(node.id) || 0}
                             isGroupDropTarget={dropTargetGroupId === node.id}
                             batchExpanded={expandedBatchNodeIds.has(node.id)}
@@ -3282,8 +3365,8 @@ function InfiniteCanvasPage() {
                             <rect width="100%" height="100%" fill={theme.canvas.selectionFill} stroke={theme.canvas.selectionStroke} strokeOpacity={0.55} strokeWidth={1 / viewport.k} strokeDasharray={`${6 / viewport.k} ${4 / viewport.k}`} />
                         </svg>
                     ) : null}
-                    {pendingConnectionCreate ? <ConnectionCreateMenu pending={pendingConnectionCreate} scale={viewport.k} onCreate={(type) => createConnectedNode(type, pendingConnectionCreate)} onClose={cancelPendingConnectionCreate} /> : null}
-                    {nodeCreatePosition ? (
+                    {!readOnly && pendingConnectionCreate ? <ConnectionCreateMenu pending={pendingConnectionCreate} scale={viewport.k} onCreate={(type) => createConnectedNode(type, pendingConnectionCreate)} onClose={cancelPendingConnectionCreate} /> : null}
+                    {!readOnly && nodeCreatePosition ? (
                         <NodeCreateMenu
                             position={nodeCreatePosition}
                             scale={viewport.k}
@@ -3319,8 +3402,9 @@ function InfiniteCanvasPage() {
                     </div>
                 </div>
 
-                <CanvasNodeHoverToolbar
-                    node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
+                {readOnly ? null : (
+                    <CanvasNodeHoverToolbar
+                        node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || Boolean(referencePickerNodeId) || expandedBatchNodeIds.has(toolbarNode?.id || "") ? null : toolbarNode}
                     viewport={viewport}
                     extraTools={toolbarNode ? buildNodeToolbarItems(toolbarNode) : undefined}
                     onKeep={keepNodeToolbar}
@@ -3345,9 +3429,10 @@ function InfiniteCanvasPage() {
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                     onUngroup={(node) => ungroupSelection(new Set([node.id]))}
-                />
+                    />
+                )}
 
-                {hasMultipleSelectedNodes && !selectionBox ? (
+                {!readOnly && hasMultipleSelectedNodes && !selectionBox ? (
                     <CanvasSelectionToolbar
                         nodes={selectedNodes}
                         viewport={viewport}
@@ -3359,8 +3444,9 @@ function InfiniteCanvasPage() {
                     />
                 ) : null}
 
-                <CanvasToolbar
-                    selectedCount={selectedNodeIds.size}
+                {readOnly ? null : (
+                    <CanvasToolbar
+                        selectedCount={selectedNodeIds.size}
                     canvasTool={canvasTool}
                     onFocusSelected={focusSelectedNode}
                     canUndo={historyState.canUndo}
@@ -3382,13 +3468,14 @@ function InfiniteCanvasPage() {
                     onCanvasToolChange={setCanvasTool}
                     onBackgroundModeChange={setBackgroundMode}
                     onShowImageInfoChange={setShowImageInfo}
-                />
+                    />
+                )}
 
                 {isMiniMapOpen ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} onViewportChange={setViewport} /> : null}
 
                 <CanvasZoomControls scale={viewport.k} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} />
 
-                {contextMenu ? (
+                {!readOnly && contextMenu ? (
                     <CanvasNodeContextMenu
                         menu={contextMenu}
                         canCaptureVideoFrame={contextMenuNode?.type === CanvasNodeType.Video && Boolean(contextMenuNode.metadata?.content)}

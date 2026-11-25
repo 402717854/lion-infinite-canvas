@@ -1,41 +1,28 @@
-# Infinite Canvas Documentation Index
+# Infinite Canvas 文档索引
 
-## Overview
+> 给 AI 与维护者使用的入口。文档为仓库内纯 Markdown，路径相对 `docs/`。
 
-- [Quick Start](/docs/overview/quick-start)
-- [Features](/docs/overview/features)
-- [Deploy on Render](/docs/overview/render)
-- [Docker Deployment](/docs/overview/docker)
-- [Third-party Prompt Sources](/docs/overview/third-party-prompt-repositories)
+## 入口
 
-## Canvas Guide
+- [快速开始](quick-start.md)：本地跑起来（纯前端 / 团队模式）
+- [部署](deployment.md)：Docker、源码构建、Vercel、Render、canvas-api + PostgreSQL 全栈
+- [待办](todo.md)：后续要做的事
+- [待测试](pending-test.md)：已实现但仍需人工验证的清单
 
-- [Canvas Node Guide](/docs/canvas/canvas-node-manual)
-- [Canvas Shortcuts](/docs/canvas/canvas-shortcuts)
+## 相关文档
 
-## Development and Data
+- [CHANGELOG](../CHANGELOG.md) · [VERSION](../VERSION)
+- [canvas-api 接口与实现说明](../canvas-api/README.md)
+- [本地 Canvas Agent](../canvas-agent/README.md)
+- [本地转发代理 canvas-proxy](../canvas-proxy/README.md)
+- [画布插件与 SDK](../plugins/infinite-canvas/README.md)
+- [漏洞提交](../SECURITY.md)
 
-- [Local Development](/docs/development/local-development)
-- [Canvas Data Structure](/docs/development/canvas-data-structure)
-- [How the Local Codex Connection Works](/docs/development/local-codex-canvas)
+## 写文档时必须遵守的事实
 
-## Business
-
-- [Open-source License](/docs/business/license)
-- [Business Cooperation](/docs/business/business)
-
-## Support and Security
-
-- [Report a Vulnerability](/docs/support/security)
-- [Sponsor the Project](/docs/support/sponsor)
-
-## Project Progress
-
-- [Changelog](/docs/progress/changelog)
-- [Pending Tests](/docs/progress/pending-test)
-- [TODO](/docs/progress/todo)
-
-## Notes
-
-- Canvas projects and My Assets are primarily stored in the browser. WebDAV can be configured for cross-device synchronization.
-- The AI API key is stored in the browser, which sends requests directly to OpenAI-compatible endpoints.
+- 纯前端模式下，画布项目、「我的素材」、生成记录和 AI API Key 都存在浏览器本地（IndexedDB / localforage）；不要写成已支持云同步。
+- 团队模式下，项目文档、素材元数据、会话与审计在 canvas-api + PostgreSQL；登录不会替换浏览器里的本地数据，迁移是复制而不是移动。
+- AI API Key 由浏览器持有并直连 OpenAI 兼容接口，不经过 canvas-api；canvas-proxy 只做本机转发。
+- 邮箱验证与找回密码目前没有 SMTP，令牌打印在 canvas-api 控制台。
+- 前端镜像只包含静态前端；团队模式可用 `docker-compose.team.yml` 一次构建前端与 canvas-api 镜像并连接已有的 PostgreSQL（不启动数据库容器），也可以分别部署 canvas-api 与 PostgreSQL。
+- 文档不写会过期的日期，除非用户明确要求记录时间。

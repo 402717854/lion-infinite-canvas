@@ -1,0 +1,34 @@
+{
+    "name": "@basketikun/canvas-api",
+    "version": "0.1.0",
+    "private": true,
+    "license": "MIT",
+    "type": "module",
+    "main": "./dist/index.js",
+    "scripts": {
+        "build": "node node_modules/typescript/bin/tsc -p tsconfig.json",
+        "start": "node dist/index.js",
+        "migrate": "node dist/migrate.js",
+        "smoke": "node dist/smoke.js",
+        "test": "node dist/smoke.js"
+    },
+    "dependencies": {
+        "@node-rs/argon2": "^2.0.2",
+        "cookie-parser": "^1.4.7",
+        "express": "^5.1.0",
+        "nanoid": "^5.1.11",
+        "pg": "^8.13.0",
+        "zod": "^3.25.0"
+    },
+    "devDependencies": {
+        "@types/cookie-parser": "^1.4.8",
+        "@types/express": "^5.0.0",
+        "@types/node": "^22.0.0",
+        "@types/pg": "^8.11.10",
+        "tsx": "^4.19.0",
+        "typescript": "^5.8.0"
+    },
+    "engines": {
+        "node": ">=20"
+    }
+}

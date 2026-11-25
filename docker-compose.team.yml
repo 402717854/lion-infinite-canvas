@@ -1,0 +1,41 @@
+# 团队模式全栈部署：前端与 canvas-api 都从源码构建镜像，连接已有的 PostgreSQL。
+# 用法：先在仓库根目录 .env 中设置 DATABASE_URL，再执行
+#   docker compose -f docker-compose.team.yml up -d --build
+name: infinite-canvas-team
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: canvas-api/Dockerfile
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      REGISTRATION_MODE: ${REGISTRATION_MODE:-open}
+      AUTO_VERIFY_EMAIL: ${AUTO_VERIFY_EMAIL:-true}
+      FILE_URL_SECRET: ${FILE_URL_SECRET:-canvas-dev-secret-change-me}
+      DATA_DIR: /data/uploads
+    volumes:
+      - uploads:/data/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  uploads:

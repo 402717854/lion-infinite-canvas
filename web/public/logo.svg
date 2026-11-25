@@ -1,4 +1,6 @@
-<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M32 8L58 54H46L32 29L18 54H6L32 8Z" fill="currentColor"/>
-  <path d="M32 40L40 54H24L32 40Z" fill="currentColor"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Viral AI">
+  <title>Viral AI</title>
+  <rect x="0.5" y="0.5" width="47" height="47" rx="11" fill="#1C1917" stroke="#FFFFFF" stroke-opacity="0.10"/>
+  <path d="M9 13 L19 34 L29 13 L39 34" fill="none" stroke="#FAF9F7" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M22.8 26 L35.2 26" fill="none" stroke="#C2410C" stroke-width="3.4" stroke-linecap="round"/>
 </svg>
