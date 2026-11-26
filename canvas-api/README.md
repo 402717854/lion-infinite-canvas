@@ -49,6 +49,7 @@ npm start
 | `DATA_DIR` | `data/uploads` | 文件落盘目录（相对 canvas-api） |
 | `FILE_URL_SECRET` | 开发默认值 | 文件签名 URL 的 HMAC 密钥 |
 | `FILE_URL_TTL_SECONDS` | `3600` | 签名 URL 有效期 |
+| `APP_ENCRYPTION_KEY` | 无 | 渠道 API Key 的 AES-256-GCM 加密密钥；`production` 下缺失直接启动失败，开发缺失用固定 dev key 并打印警告 |
 | `NODE_ENV` | - | `production` 时不在忘记密码响应中返回 `resetToken` |
 
 `.env` 由 `src/config.ts` 零依赖读取，不覆盖已存在的环境变量。
@@ -72,8 +73,12 @@ src/
   lib/audit.ts      审计写入（只追加）
   lib/mailer.ts     开发期邮件占位（控制台打印令牌）
   lib/storage.ts    本地落盘 + HMAC 签名 URL
+  lib/crypto.ts     渠道密钥 AES-256-GCM 加解密与掩码
+  lib/models.ts     模型值解析、授权解析、配额预扣/归还、用量写入
+  lib/upstream.ts   上游 URL/请求头/错误脱敏/重试
   lib/validate.ts   邮箱 / 密码 / 注册 / 登录 / 文档 schema
   routes/           auth / workspaces / projects / assets / files / audit
+                    channels / models / usage / gateway
   smoke.ts          进程内冒烟测试
 ```
 
@@ -112,6 +117,20 @@ src/
 - 审计只追加，支持 `action/actorId/from/to/limit/cursor`，`nextCursor` 为可排序 id 游标。
 - 迁移接口逐项返回 `{created:[{index,type,id,title}],failed:[{index,reason}]}`，不做整体事务。
 
+### 模型管理 / 网关 / 用量
+
+管理面：`GET/POST /api/workspaces/:id/channels`、`PATCH/DELETE /api/workspaces/:id/channels/:channelId`、`POST /api/workspaces/:id/channels/:channelId/test`、`GET /api/workspaces/:id/channels/:channelId/models/upstream`、`POST /api/workspaces/:id/channels/:channelId/models/import`、`GET/POST /api/workspaces/:id/models`、`PATCH/DELETE /api/workspaces/:id/models/:mid`、`GET /api/workspaces/:id/models/available`、`GET/PUT /api/workspaces/:id/model-grants`、`GET/PUT /api/workspaces/:id/model-bindings`、`GET /api/workspaces/:id/usage`、`GET /api/workspaces/:id/usage/export.csv`。
+
+网关：`POST /v1/gateway/images/generations`、`POST /v1/gateway/images/edits`、`POST /v1/gateway/videos`、`GET /v1/gateway/videos/:taskId`、`GET /v1/gateway/videos/:taskId/content`、`POST /v1/gateway/chat/completions`（文本，`{model, messages, stream}`）、`POST /v1/gateway/audio/speech`。请求头带 `x-workspace-id`、`x-model`（`channelId::模型名`）、`x-entry`（`canvas`/`image`/`video`/`assistant`/`agent`/`api`）与 CSRF 头；响应保持 OpenAI 兼容形态。
+
+- 渠道密钥用 `APP_ENCRYPTION_KEY` 做 AES-256-GCM 加密入库，接口只回 `apiKeyMask`（前 3 + `••••` + 后 4）；`PATCH` 带 `apiKey` 即轮换。
+- 权限点：`model.read`、`model.use`、`model.channel.manage`、`model.entry.manage`、`model.grant.manage`、`usage.read`、`usage.export`。
+- 授权按 member > role > workspace 覆盖；未授权模型不出现在 `models/available`；`owner`/`admin` 绕过授权与配额，用量照记。
+- 配额按次数预扣（`usage_counters` 行锁）再实扣，超限返回 402 `QUOTA_EXCEEDED`（`data` 含 `model/limitType/limit/used/resetsAt`）；上游失败归还预扣。
+- 网关图片 `b64_json` 落盘为 `files` 记录并改成签名 URL 返回；每次调用写 `usage_records`，失败记录 `error_code`。
+- 上游错误映射：401/403/429/5xx/超时 → 502 `UPSTREAM_ERROR`（`data.upstreamStatus` + 脱敏摘要），参数类 4xx → 400 `INVALID_PARAM`。
+- 用量报表按 `groupBy=day|user|model|channel` 聚合，区间默认 7 天、最长 366 天；CSV 上限 10 万行，带 UTF-8 BOM。
+
 ## 数据与安全
 
 - 所有 id 使用 nanoid；时间为 `timestamptz`；会话与邀请只存令牌的 sha256。
@@ -131,6 +150,7 @@ src/
 8. 删除空间为软删除（`deleted_at`），成员与项目数据保留；删除项目同样软删除，未实现 30 天恢复界面。
 9. 素材/文件 ACL 按空间成员 + `asset.*` 权限，`private` 素材仅 owner 可见；未实现 `link` 分享与访客只读页。
 10. `dist/migrate.js` 读取 `src/schema.sql`（tsc 不复制 .sql），因此从其他目录运行 migrate 时需保证 `canvas-api/src/schema.sql` 存在。
+11. 模型管理 M3 只落地一期：熔断降级链、别名预设、按金额配额、成本告警、申请额度、个人访问令牌、`Idempotency-Key`、视频结果落盘、受管自定义脚本、平台渠道、角色级默认模型覆盖、Gemini 协议网关都未实现；网关只代理 OpenAI 兼容协议。
 
 ## 冒烟测试覆盖
 

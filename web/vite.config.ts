@@ -9,6 +9,7 @@ import { parseChangelog } from "./src/lib/release";
 const webDir = dirname(fileURLToPath(import.meta.url));
 const localVersion = readFileSync(resolve(webDir, "../VERSION"), "utf8").trim() || "dev";
 const localChangelog = readFileSync(resolve(webDir, "../CHANGELOG.md"), "utf8");
+const apiTarget = process.env.VITE_API_PROXY || "http://127.0.0.1:8787";
 
 // Expose /plugins/index.json with local plugin files from public/plugins.
 // The frontend can discover and list them when enabled; development reads the directory live, while builds emit a static registry.
@@ -49,7 +50,11 @@ export default defineConfig({
     server: {
         proxy: {
             "/api": {
-                target: process.env.VITE_API_PROXY || "http://127.0.0.1:8787",
+                target: apiTarget,
+                changeOrigin: false,
+            },
+            "/v1/gateway": {
+                target: apiTarget,
                 changeOrigin: false,
             },
         },

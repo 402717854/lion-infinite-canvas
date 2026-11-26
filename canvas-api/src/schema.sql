@@ -161,3 +161,104 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS audit_logs_workspace_idx ON audit_logs(workspace_id, id DESC);
+
+-- 模型渠道：上游 Base URL + 加密后的 Key，只存在服务端。
+CREATE TABLE IF NOT EXISTS channels (
+    id text PRIMARY KEY,
+    workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    name text NOT NULL,
+    base_url text NOT NULL,
+    api_key_cipher text NOT NULL,
+    api_key_hint text NOT NULL,
+    api_format text NOT NULL DEFAULT 'openai',
+    headers_cipher text,
+    timeout_ms integer NOT NULL DEFAULT 60000,
+    retry integer NOT NULL DEFAULT 1,
+    enabled boolean NOT NULL DEFAULT true,
+    created_by text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    deleted_at timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS channels_workspace_name_idx
+    ON channels(workspace_id, lower(name)) WHERE deleted_at IS NULL;
+
+-- 模型条目：渠道下的一个上游模型，带能力、参数模板与计价。
+CREATE TABLE IF NOT EXISTS models (
+    id text PRIMARY KEY,
+    workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    channel_id text NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    model_id text NOT NULL,
+    display_name text NOT NULL,
+    capabilities text[] NOT NULL DEFAULT '{image}',
+    params jsonb NOT NULL DEFAULT '{}'::jsonb,
+    pricing jsonb NOT NULL DEFAULT '{}'::jsonb,
+    enabled boolean NOT NULL DEFAULT true,
+    note text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (channel_id, model_id)
+);
+CREATE INDEX IF NOT EXISTS models_workspace_idx ON models(workspace_id);
+
+-- 授权：模型 × 主体（空间 / 角色 / 成员），可见性、入口、配额都在这一行。
+CREATE TABLE IF NOT EXISTS model_grants (
+    id text PRIMARY KEY,
+    workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    model_id text NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    subject_type text NOT NULL,
+    subject_id text NOT NULL DEFAULT '',
+    visible boolean NOT NULL DEFAULT true,
+    entries text[] NOT NULL DEFAULT '{canvas,image,video,assistant,agent,api}',
+    daily_limit integer,
+    monthly_limit integer,
+    enabled boolean NOT NULL DEFAULT true,
+    updated_by text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (model_id, subject_type, subject_id)
+);
+
+-- 空间级默认模型：能力 → 模型条目。
+CREATE TABLE IF NOT EXISTS model_bindings (
+    workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    capability text NOT NULL,
+    model_id text NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    updated_by text,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, capability)
+);
+
+-- 用量明细：一次调用一行，不存请求/响应体。
+CREATE TABLE IF NOT EXISTS usage_records (
+    id text PRIMARY KEY,
+    workspace_id text NOT NULL,
+    user_id text NOT NULL,
+    grant_id text,
+    channel_id text,
+    model_pk text,
+    model_id text NOT NULL,
+    capability text NOT NULL,
+    entry text NOT NULL,
+    status text NOT NULL,
+    error_code text,
+    units integer NOT NULL DEFAULT 1,
+    unit_type text NOT NULL DEFAULT 'call',
+    latency_ms integer,
+    cost_micros bigint NOT NULL DEFAULT 0,
+    request_hash text,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS usage_records_ws_time_idx ON usage_records(workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS usage_records_ws_user_time_idx ON usage_records(workspace_id, user_id, created_at DESC);
+
+-- 配额计数：按授权对象与周期累计，预扣在此表加行锁。
+CREATE TABLE IF NOT EXISTS usage_counters (
+    grant_id text NOT NULL,
+    period text NOT NULL,
+    period_start date NOT NULL,
+    calls integer NOT NULL DEFAULT 0,
+    cost_micros bigint NOT NULL DEFAULT 0,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (grant_id, period, period_start)
+);

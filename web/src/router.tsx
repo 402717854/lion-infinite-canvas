@@ -24,10 +24,13 @@ import PromptsPage from "@/pages/prompts";
 import VideoPage from "@/pages/video";
 import WorkspaceAuditPage from "@/pages/workspace/audit";
 import WorkspaceMembersPage from "@/pages/workspace/members";
+import WorkspaceModelGrantsPage from "@/pages/workspace/model-grants";
+import WorkspaceModelsPage from "@/pages/workspace/models";
 import WorkspaceProfilePage from "@/pages/workspace/profile";
 import WorkspaceProjectsPage from "@/pages/workspace/projects";
 import WorkspaceRolesPage from "@/pages/workspace/roles";
 import WorkspaceSettingsPage from "@/pages/workspace/settings";
+import WorkspaceUsagePage from "@/pages/workspace/usage";
 
 export const router = createBrowserRouter([
     { path: "/login", element: <LoginPage /> },
@@ -89,6 +92,30 @@ export const router = createBrowserRouter([
                 element: (
                     <RequireWorkspacePermission permission="audit.read">
                         <WorkspaceAuditPage />
+                    </RequireWorkspacePermission>
+                ),
+            },
+            {
+                path: "models",
+                element: (
+                    <RequireWorkspacePermission permission="model.read">
+                        <WorkspaceModelsPage />
+                    </RequireWorkspacePermission>
+                ),
+            },
+            {
+                path: "models/grants",
+                element: (
+                    <RequireWorkspacePermission permission="model.read">
+                        <WorkspaceModelGrantsPage />
+                    </RequireWorkspacePermission>
+                ),
+            },
+            {
+                path: "usage",
+                element: (
+                    <RequireWorkspacePermission permission="usage.read">
+                        <WorkspaceUsagePage />
                     </RequireWorkspacePermission>
                 ),
             },

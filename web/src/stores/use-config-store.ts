@@ -4,6 +4,9 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { GATEWAY_BASE_URL } from "@/services/api/gateway";
+import { useModelStore } from "@/stores/use-model-store";
+import type { AvailableModelsPayload, ModelEntryValue } from "@/types/team";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -56,6 +59,10 @@ export type AiConfig = {
     proxyUrl: string;
     nodeRegenerateBehavior: "new-node" | "overwrite";
     autoFocusOnSelect: boolean;
+    /** 团队模式：走 canvas-api 网关而不是浏览器直连上游。 */
+    gateway?: { workspaceId: string; entry: ModelEntryValue };
+    /** 模型复合值 `channelId::model`，网关据此定位模型。 */
+    modelValue?: string;
 };
 
 export type WebdavSyncConfig = {
@@ -219,10 +226,13 @@ export function selectableModelsByCapability(config: AiConfig, capability?: Mode
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
 export function resolveModelScript(config: AiConfig, value: string) {
+    // 团队模式只用服务端声明的适配器，浏览器本地脚本不参与。
+    if (config.gateway) return "";
     return findChannelModel(config, value)?.model.script?.trim() || "";
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
+    if (config.gateway) return Boolean(model) && config.models.includes(model);
     const match = findChannelModel(config, model);
     return Boolean(match && match.channel.baseUrl.trim() && match.channel.apiKey.trim());
 }
@@ -299,6 +309,8 @@ export const useConfigStore = create<ConfigStore>()(
                         proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,
                         nodeRegenerateBehavior: config.nodeRegenerateBehavior === "overwrite" ? "overwrite" : "new-node",
                         autoFocusOnSelect: Boolean(config.autoFocusOnSelect),
+                        gateway: undefined,
+                        modelValue: undefined,
                     },
                 };
             },
@@ -308,7 +320,44 @@ export const useConfigStore = create<ConfigStore>()(
 
 export function useEffectiveConfig() {
     const config = useConfigStore((state) => state.config);
-    return useMemo(() => ({ ...config, channelMode: "local" as const }), [config]);
+    const workspaceId = useModelStore((state) => state.workspaceId);
+    const entry = useModelStore((state) => state.entry);
+    const data = useModelStore((state) => state.data);
+    return useMemo(() => {
+        if (!workspaceId) return { ...config, channelMode: "local" as const };
+        return withGatewayModels(config, workspaceId, entry, data);
+    }, [config, workspaceId, entry, data]);
+}
+
+/** 团队模式下用服务端授权过的模型替换本地渠道，模型值仍是 `channelId::model`。 */
+function withGatewayModels(config: AiConfig, workspaceId: string, entry: ModelEntryValue, data: AvailableModelsPayload | null): AiConfig {
+    const channels: ModelChannel[] = (data?.channels ?? []).map((channel) => ({
+        id: channel.id,
+        name: channel.name,
+        baseUrl: "",
+        apiKey: "",
+        apiFormat: "openai" as ApiCallFormat,
+        models: Array.from(new Map(channel.models.map((model) => [model.name, { name: model.name, capability: (model.capabilities[0] || guessCapability(model.name)) as ModelCapability }])).values()),
+    }));
+    const models = modelOptionsFromChannels(channels);
+    const capabilityDefault = (capability: ModelCapability) =>
+        models.find((value) => {
+            const decoded = decodeChannelModel(value);
+            return channels.some((channel) => channel.id === decoded?.channelId && channel.models.some((model) => model.name === decoded.model && model.capability === capability));
+        }) || "";
+    const pick = (value: string | null | undefined, capability: ModelCapability) => (value && models.includes(value) ? value : capabilityDefault(capability));
+    return {
+        ...config,
+        channelMode: "local",
+        channels,
+        models,
+        gateway: { workspaceId, entry },
+        model: pick(data?.bindings.image, "image"),
+        imageModel: pick(data?.bindings.image, "image"),
+        videoModel: pick(data?.bindings.video, "video"),
+        textModel: pick(data?.bindings.text, "text"),
+        audioModel: pick(data?.bindings.audio, "audio"),
+    };
 }
 
 /** Normalize a mixed list of raw model names or model objects into deduped ChannelModel entries. */
@@ -451,6 +500,18 @@ export function resolveModelChannel(config: AiConfig, value: string) {
 }
 
 export function resolveModelRequestConfig(config: AiConfig, value: string) {
+    if (config.gateway) {
+        const modelValue = (value || config.model).trim();
+        const separatorAt = modelValue.indexOf(CHANNEL_MODEL_SEPARATOR);
+        return {
+            ...config,
+            model: separatorAt >= 0 ? modelValue.slice(separatorAt + CHANNEL_MODEL_SEPARATOR.length) : modelValue,
+            modelValue,
+            baseUrl: GATEWAY_BASE_URL,
+            apiKey: "",
+            apiFormat: "openai" as ApiCallFormat,
+        };
+    }
     const channel = resolveModelChannel(config, value);
     return {
         ...config,
@@ -502,7 +563,8 @@ function uniqueModelOptions(models: string[]) {
 export function buildApiUrl(baseUrl: string, path: string) {
     const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
-    const apiBaseUrl = lowerBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
+    // 网关地址本身已经是 /v1/gateway，不再补 /v1。
+    const apiBaseUrl = lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/gateway") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
     return withLocalProxy(`${apiBaseUrl}${path}`);
 }
 
@@ -514,6 +576,7 @@ export function normalizeLocalProxyUrl(value: string) {
 
 /** Prefix an outgoing request with the local forwarding proxy so the browser is not blocked by CORS. */
 export function withLocalProxy(url: string) {
+    if (url.includes("/v1/gateway/")) return url;
     const { proxyEnabled, proxyUrl } = useConfigStore.getState().config;
     if (!proxyEnabled || !/^https?:\/\//i.test(url)) return url;
     const base = normalizeLocalProxyUrl(proxyUrl);

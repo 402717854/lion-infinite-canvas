@@ -76,6 +76,8 @@ bun run dev
 
 打开 `http://localhost:3000` 注册账号。默认 `AUTO_VERIFY_EMAIL=true`，注册即视为邮箱已验证；设为 `false` 时验证令牌会打印在 canvas-api 控制台。
 
+团队模式下渠道与 API Key 由服务端托管：进入空间后在「模型」页新建渠道、拉取模型并配置授权配额，成员在画布里的生成请求会走 `/v1/gateway`（Vite 与 `nginx.team.conf` 都已配好反代），不再需要各自填写 Key。细节见[模型管理](model-management.md)。
+
 ### 4. 冒烟测试（可选）
 
 ```bash
@@ -100,6 +102,7 @@ docker compose -f docker-compose.team.yml up -d --build    # 团队模式，连�
 | 端口被占用 | 前端默认 3000，canvas-api 默认 8787（`PORT`），Postgres 开发库 55432 |
 | 生成请求被跨域拦截 | 纯前端模式由浏览器直连 AI 服务，属于对方 CORS；可用 [canvas-proxy](../canvas-proxy/README.md) 本机转发 |
 | 团队接口 404 | 确认访问的是 Vite 开发服务器（带 `/api` 代理），或部署时已把 `/api` 反代到 canvas-api |
+| 团队模式生成返回 404 或 `MODEL_NOT_GRANTED` | 前者检查 `/v1/gateway` 是否也反代到 canvas-api；后者在「模型」页给当前角色/成员授权该模型并勾选对应入口 |
 | 登录后刷新变 401 | `APP_ORIGIN` 与实际访问来源不一致；HTTPS 部署要同时设 `SESSION_COOKIE_SECURE=true` |
 | 找不到 `psql` / `pg_ctl` | 安装 PostgreSQL 并加入 PATH，或设置 `PG_BIN` 指向其 bin 目录 |
 | 迁移后没有新表 | `npm run migrate` 依赖 `dist/`，先 `npm run build`；脚本读取 `src/schema.sql`，需要在 canvas-api 目录下运行 |

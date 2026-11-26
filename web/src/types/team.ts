@@ -116,3 +116,147 @@ export type AuditRecord = {
     createdAt: string;
     diff: Record<string, unknown> | null;
 };
+
+export type ModelCapabilityValue = "image" | "video" | "text" | "audio";
+export type ModelEntryValue = "canvas" | "image" | "video" | "assistant" | "agent" | "api";
+export type ModelSubjectType = "workspace" | "role" | "member";
+
+export type ChannelRecord = {
+    id: string;
+    name: string;
+    baseUrl: string;
+    apiKeyMask: string;
+    apiFormat: string;
+    timeoutMs: number;
+    retry: number;
+    enabled: boolean;
+    modelCount: number;
+    todayCalls: number;
+    lastOkAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type ModelParamDefinition = {
+    options?: string[];
+    default?: string;
+};
+
+export type ModelPricing = {
+    unit?: string;
+    amount?: number;
+    currency?: string;
+};
+
+export type ModelGrantItem = {
+    subjectType: ModelSubjectType;
+    subjectId: string;
+    visible: boolean;
+    entries: ModelEntryValue[];
+    dailyLimit: number | null;
+    monthlyLimit: number | null;
+};
+
+export type ModelRecord = {
+    id: string;
+    channelId: string;
+    channelName: string;
+    modelId: string;
+    value: string;
+    displayName: string;
+    capabilities: ModelCapabilityValue[];
+    params: Record<string, Record<string, ModelParamDefinition>>;
+    pricing: ModelPricing;
+    enabled: boolean;
+    channelEnabled: boolean;
+    note: string | null;
+    grants: ModelGrantItem[];
+    todayCalls: number;
+};
+
+export type AvailableModel = {
+    name: string;
+    displayName: string;
+    value: string;
+    capabilities: ModelCapabilityValue[];
+    params: Record<string, Record<string, ModelParamDefinition>>;
+    pricing: ModelPricing;
+};
+
+export type AvailableChannel = {
+    id: string;
+    name: string;
+    apiFormat: string;
+    models: AvailableModel[];
+};
+
+export type ModelQuota = {
+    model: string;
+    daily: { limit: number | null; used: number; resetsAt: string };
+    monthly: { limit: number | null; used: number; resetsAt: string };
+};
+
+export type AvailableModelsPayload = {
+    channels: AvailableChannel[];
+    bindings: Record<ModelCapabilityValue, string | null>;
+    grants: Record<string, { visible: boolean; entries: ModelEntryValue[] }>;
+    quota: ModelQuota[];
+};
+
+export type GrantRowRecord = {
+    id: string;
+    subjectType: ModelSubjectType;
+    subjectId: string;
+    visible: boolean;
+    entries: ModelEntryValue[];
+    dailyLimit: number | null;
+    monthlyLimit: number | null;
+    todayUsed: number;
+    monthUsed: number;
+};
+
+export type ModelGrantsPayload = {
+    model: { id: string; modelId: string; displayName: string; value: string };
+    roles: Array<{ key: string; name: string }>;
+    members: Array<{ id: string; displayName: string; roleKey: string; roleName: string }>;
+    resetsAt: { daily: string; monthly: string };
+    items: GrantRowRecord[];
+};
+
+export type ModelBindingsPayload = Record<ModelCapabilityValue, { value: string; displayName: string } | null>;
+
+export type UsageTotals = {
+    calls: number;
+    succeeded: number;
+    failed: number;
+    avgLatencyMs: number;
+    costMicros: number;
+};
+
+export type UsageSeriesItem = {
+    key: string;
+    calls: number;
+    succeeded: number;
+    failed: number;
+    costMicros: number;
+    capabilities: Record<string, number>;
+};
+
+export type UsageRow = {
+    key: string;
+    name: string;
+    roleKey?: string;
+    calls: number;
+    failed: number;
+    avgLatencyMs: number;
+    costMicros: number;
+    dailyLimit?: number | null;
+    usedToday?: number;
+};
+
+export type UsagePayload = {
+    range: { from: string; to: string; timeZone: string };
+    totals: UsageTotals;
+    series: UsageSeriesItem[];
+    rows: UsageRow[];
+};

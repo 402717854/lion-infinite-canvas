@@ -4,13 +4,14 @@
 
 | 组件 | 作用 | 什么时候需要 |
 | --- | --- | --- |
-| 静态前端（`web/dist`） | 画布界面；AI 请求由浏览器直连用户自己的 OpenAI 兼容接口 | 总是 |
+| 静态前端（`web/dist`） | 画布界面；本地模式下 AI 请求由浏览器直连用户自己的 OpenAI 兼容接口 | 总是 |
 | nginx（镜像内） | 提供静态文件、SPA 回退、运行期 `config.js` | 总是 |
-| canvas-api | 账号、空间、成员角色、项目/素材云端存储、审计 | 团队模式 |
-| PostgreSQL | 会话、成员、项目文档、文件元数据、审计 | 团队模式 |
+| canvas-api | 账号、空间、成员角色、项目/素材云端存储、审计、模型网关 | 团队模式 |
+| PostgreSQL | 会话、成员、项目文档、文件元数据、审计、渠道密钥密文与用量 | 团队模式 |
 
 - 纯前端部署只有一个静态站点，没有服务端数据。
-- 团队模式把 `/api` 反代到 canvas-api，前端仍按同源 `/api` 访问。
+- 团队模式把 `/api` 与 `/v1/gateway` 反代到 canvas-api，前端仍按同源路径访问。
+- 团队模式下渠道与 API Key 只存在服务端（密文 + 掩码回显），生成请求经 `/v1/gateway/**` 转发并按授权与配额计量。
 - 素材和文件落在 canvas-api 的 `DATA_DIR`，读取走带过期时间的 HMAC 签名 URL。
 
 ## 2. 环境变量
@@ -47,6 +48,7 @@
 | `DATA_DIR` | `data/uploads` | 素材/文件落盘目录（相对 canvas-api） |
 | `FILE_URL_SECRET` | 开发默认值 | 签名 URL 的 HMAC 密钥，生产必须替换 |
 | `FILE_URL_TTL_SECONDS` | `3600` | 签名 URL 有效期 |
+| `APP_ENCRYPTION_KEY` | 无 | 渠道 API Key 的 AES-256-GCM 加密密钥；`NODE_ENV=production` 时缺失会启动失败，开发缺失用固定 dev key 并打印警告 |
 | `NODE_ENV` | - | `production` 时忘记密码接口不返回 `resetToken` |
 
 ### 全栈 Compose（`docker-compose.team.yml`）
@@ -60,6 +62,7 @@
 | `REGISTRATION_MODE` | `open` | `open` / `invite` / `closed` |
 | `AUTO_VERIFY_EMAIL` | `true` | 没有 SMTP 时保持 `true` |
 | `FILE_URL_SECRET` | 开发默认值 | 生产必须换成随机长字符串 |
+| `APP_ENCRYPTION_KEY` | 无（必填） | 渠道 API Key 的加密密钥，`NODE_ENV=production` 下缺失会启动失败；多实例必须一致 |
 
 这些变量写在仓库根目录的 `.env` 中由 Compose 读取；`DATABASE_URL` 必填，其余不建 `.env` 时使用上表默认值。
 
@@ -137,6 +140,7 @@ DATABASE_URL=postgres://用户:密码@host.docker.internal:5432/infinite_canvas
 APP_ORIGIN=https://canvas.example.com
 SESSION_COOKIE_SECURE=true
 FILE_URL_SECRET=<随机长字符串>
+APP_ENCRYPTION_KEY=<随机长字符串>
 REGISTRATION_MODE=invite
 ```
 
@@ -207,6 +211,7 @@ DATABASE_URL=postgres://user:pass@db:5432/infinite_canvas \
 APP_ORIGIN=https://canvas.example.com \
 SESSION_COOKIE_SECURE=true \
 FILE_URL_SECRET=<随机长字符串> \
+APP_ENCRYPTION_KEY=<随机长字符串> \
 DATA_DIR=/data/uploads \
 node dist/index.js
 ```
@@ -215,9 +220,9 @@ node dist/index.js
 - 多实例时 `FILE_URL_SECRET` 必须一致（会话已存 Postgres，可水平扩展）。
 - 升级先执行 `npm run migrate`，再重启进程。
 
-### 8.3 nginx 反代 `/api`
+### 8.3 nginx 反代 `/api` 与 `/v1/gateway`
 
-前端容器与 canvas-api 可以分开跑，让 nginx 把 `/api` 转给 canvas-api，其余走静态文件。仓库根目录的 `nginx.team.conf` 就是这份配置（上游写成 `api:8787`），Compose 会把它挂载到前端容器；单独部署时复制该文件并按实际上游地址调整：
+前端容器与 canvas-api 可以分开跑，让 nginx 把 `/api` 与 `/v1/gateway` 转给 canvas-api，其余走静态文件。仓库根目录的 `nginx.team.conf` 就是这份配置（上游写成 `api:8787`），Compose 会把它挂载到前端容器；单独部署时复制该文件并按实际上游地址调整：
 
 ```nginx
 server {
@@ -233,6 +238,20 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    # 模型网关：SSE 需要关闭缓冲
+    location /v1/gateway/ {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
     location = /config.js {
         add_header Cache-Control "no-store";
     }
@@ -246,8 +265,9 @@ server {
 注意：
 
 - `proxy_pass` 末尾不要加斜杠，否则 `/api` 前缀会被截掉。
-- `client_max_body_size` 要大于单文件上限（canvas-api 允许 200MB）。
-- 前端同源访问 `/api` 时不需要 `VITE_API_BASE`，Cookie 与 CSRF 行为与开发环境一致。
+- `client_max_body_size` 要大于单文件上限（canvas-api 允许 200MB；网关的图片编辑上限 25MB）。
+- `/v1/gateway/` 必须关闭 `proxy_buffering`，否则画布助手的 SSE 回复会被一次性吐出。
+- 前端同源访问 `/api` 与 `/v1/gateway` 时不需要 `VITE_API_BASE`，Cookie 与 CSRF 行为与开发环境一致。
 
 ### 8.4 HTTPS 与 Cookie
 
@@ -267,9 +287,10 @@ tar czf uploads.tgz -C canvas-api data/uploads
 ## 9. 安全清单
 
 - `FILE_URL_SECRET` 换成随机长字符串；默认值等于公开密钥，能被用来伪造素材下载链接。
+- `APP_ENCRYPTION_KEY` 必须设置成随机长字符串并妥善保管：渠道 API Key 用它做 AES-256-GCM 加密入库，换掉后旧密文无法解密，需要重新填写渠道密钥。
 - 生产开 HTTPS + `SESSION_COOKIE_SECURE=true`，按需把 `REGISTRATION_MODE` 改为 `invite` 或 `closed`。
 - 目前没有 SMTP：邮箱验证/重置密码的令牌只打印在 canvas-api 控制台。要么保持 `AUTO_VERIFY_EMAIL=true`，要么先接入邮件服务再关闭。
-- AI API Key 存在浏览器本地，由浏览器直连用户自己的接口，不经过本项目服务端；不要写进任何服务端配置。
+- 本地模式下 AI API Key 存在浏览器本地，由浏览器直连用户自己的接口；团队模式下渠道与 Key 只存在服务端，接口只回掩码，生成请求经 `/v1/gateway` 转发，不要把 Key 写进前端配置或日志。
 - canvas-api 不要不设 `APP_ORIGIN` 就暴露到公网；错误响应不返回堆栈，但 CORS 与 Cookie 仍需正确配置。
 - 素材 URL 带过期时间，过期后需要重新获取，不要把签名 URL 当永久链接保存。
 
@@ -280,6 +301,8 @@ tar czf uploads.tgz -C canvas-api data/uploads
 | 构建报 `ENOENT` 找不到 `VERSION` 或 `CHANGELOG.md` | 仓库根目录缺文件，或 `.dockerignore` 把它们排除了 |
 | 容器已启动但 3000 打不开 | 确认 nginx 监听端口与 compose 映射一致（镜像内为 3000） |
 | 页面能开，接口全 404 | 生产环境没有把 `/api` 反代到 canvas-api，或 `VITE_API_BASE` 写错 |
+| 生成请求 404 | 没有把 `/v1/gateway` 反代到 canvas-api（或 `VITE_API_BASE` 指向的地址缺少该前缀） |
+| 画布助手回复一次性出现 | 反代没有对 `/v1/gateway/` 关闭 `proxy_buffering` |
 | 登录成功，刷新后 401 | `APP_ORIGIN` 不匹配、HTTPS 下未设 `SESSION_COOKIE_SECURE`、或跨站访问导致 Cookie 不发送；用 HTTP 访问时若 `SESSION_COOKIE_SECURE=true`，`Set-Cookie` 带 `Secure` 会被浏览器直接丢弃，同样表现为登录后一直 401 |
 | 上传大文件失败 | 反向代理的 `client_max_body_size` 小于 200MB |
 | 素材 403 `SIGNATURE_INVALID` | 签名过期，或 `FILE_URL_SECRET` 与签发时不一致 |

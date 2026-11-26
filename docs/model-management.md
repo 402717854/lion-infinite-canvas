@@ -1,6 +1,6 @@
 # 模型管理 M3 需求文档
 
-> 状态：待确认。确认范围与边界值后再落地。
+> 状态：已实现（P0 全量落地，P1 项保持待办）。人工验收清单见 docs/pending-test.md 的「团队平台 M3」。
 > 上游依据：《无限画布 PRD-登录注册-模型管理-权限管理》§4 D3/D5、§7.2、§9、§10.3、§10.4。
 > 相关：docs/index.md、canvas-api/README.md、docs/pending-test.md。
 
@@ -35,7 +35,7 @@
 1. 渠道 CRUD + 密钥加密托管 + 掩码回显 + 轮换 + 连通性测试。
 2. 模型条目 CRUD + 从上游 `GET /models` 批量导入 + 能力推断 + 参数模板 + 计价。
 3. 授权矩阵：可见性、可用入口、日/月次数上限；空间级四类默认模型绑定。
-4. 网关：`images/generations`、`images/edits`、`videos`（建任务/轮询/取内容）、`responses`（SSE 透传）、`audio/speech`。
+4. 网关：`images/generations`、`images/edits`、`videos`（建任务/轮询/取内容）、`chat/completions`（文本）、`audio/speech`。
 5. 配额预扣与结算，超限 `402 QUOTA_EXCEEDED`。
 6. 用量明细、聚合报表、CSV 导出。
 7. 审计：渠道/密钥/模型/授权变更。
@@ -366,7 +366,7 @@ owner/admin 绕过授权与配额（原型：全入口不可关闭、上限不�
 | POST | `/v1/gateway/videos` | `POST {base}/videos` |
 | GET | `/v1/gateway/videos/:taskId` | `GET {base}/videos/{id}` |
 | GET | `/v1/gateway/videos/:taskId/content` | `GET {base}/videos/{id}/content` |
-| POST | `/v1/gateway/responses` | `POST {base}/chat/completions`（SSE 透传） |
+| POST | `/v1/gateway/chat/completions` | `POST {base}/chat/completions`（文本；`stream: true` 时 SSE 透传） |
 | POST | `/v1/gateway/audio/speech` | `POST {base}/audio/speech` |
 
 请求头：
@@ -539,7 +539,7 @@ await tx(async (c) => {
 | 图片响应缓冲上限 | 64MB | `images/*` 落盘前 | 502，提示「上游返回内容过大」 |
 | 图片编辑上传上限 | 25MB | `images/edits` 原始 Buffer | 413 `PAYLOAD_TOO_LARGE` |
 | JSON 网关请求体 | 20MB | `images/generations`、`responses` | 413 |
-| SSE 首字节超时 | 120s | `responses` | 502，断开 |
+| SSE 首字节超时 | 120s | `chat/completions`（`stream: true`） | 502，断开 |
 | 用量导出 | 10 万行 | CSV | 400，提示缩小范围 |
 | 用量区间 | 默认 7 天，最长 366 天 | 报表/导出 | 400 |
 | 配额周期时区 | `Asia/Shanghai`（存 `workspaces.settings.timezone`） | 日/月切分 | — |
@@ -587,13 +587,39 @@ await tx(async (c) => {
 - [ ] 导出 CSV 用 Excel 打开中文不乱码。
 - [ ] 本地模式（非 `/w/:wsId`）行为与现在完全一致。
 
-## 16 待确认
+## 16 已确认的决策
 
-1. **一期范围**：§2.1 的 8 项是否就是这次的落地范围？尤其「视频结果落盘」「PAT」「按金额配额」是否同意放二期。
-2. **配额单位**：一期只按「次数」，金额只用于报表估算，是否可接受？
-3. **失败是否归还预扣**：建议归还（上游故障不该吃用户额度），请确认。
-4. **owner/admin 是否绕过授权与配额**：建议绕过（与原型一致），但用量照记。
-5. **团队模式是否完全禁用本地直连**：建议是（否则配额形同虚设），本地面板保持只读。
-6. **Gemini 直连**：一期网关只做 OpenAI 兼容，Gemini 格式渠道二期再支持，是否可接受？
-7. **平台渠道（跨空间下发）**：建议二期，一期只有空间自有渠道。
-8. **§12 的边界值**：超时 60s、重试 1、导出 10 万行、编辑上传 25MB、密钥 dev 兜底，是否按此实现？
+1. 一期落地 §2.1 的 8 项；视频结果落盘、PAT、按金额配额、熔断降级链、别名预设、成本告警、申请额度、受管脚本、平台渠道、角色级默认模型覆盖都放二期。
+2. 配额一期只按「次数」，金额只用于报表估算。
+3. 失败归还预扣（上游故障不吃用户额度）。
+4. owner/admin 绕过授权与配额，用量照记。
+5. 团队模式禁用本地直连，本地模式入口保留。
+6. 一期网关只做 OpenAI 兼容，Gemini 格式渠道二期支持。
+7. 一期只有空间自有渠道，不做平台渠道跨空间下发。
+8. §12 的边界值按表实现：超时 60s（5–300）、重试 1（0–2）、导出 10 万行、编辑上传 25MB、JSON 20MB、SSE 首字节 120s、密钥 dev 兜底并打印警告。
+
+## 17 落地记录
+
+### 17.1 服务端（canvas-api）
+
+- `src/schema.sql` 追加 `channels`、`models`、`model_grants`、`model_bindings`、`usage_records`、`usage_counters`。
+- `src/lib/crypto.ts`（AES-256-GCM 加解密 + 掩码）、`src/lib/models.ts`（模型值解析、授权解析、配额预扣/归还、用量写入、能力推断、时区与周期）、`src/lib/upstream.ts`（上游 URL/请求头/错误脱敏/重试）。
+- `src/routes/channels.ts`、`src/routes/models.ts`、`src/routes/usage.ts` 挂在 `/api/workspaces`；`src/routes/gateway.ts` 挂在 `/v1/gateway`，在 `express.json` 之前注册以保留 multipart。
+- 网关端点：`images/generations`、`images/edits`、`videos`、`videos/:taskId`、`videos/:taskId/content`、`chat/completions`（文本，`{ model, messages, stream }`）、`audio/speech`。图片 `b64_json` 落盘后改成签名 URL 返回。
+- 审计动作：`channel.create`、`channel.update`、`channel.key.rotate`、`channel.delete`、`channel.test`、`model.create`、`model.update`、`model.delete`、`model.import`、`grant.update`、`binding.update`、`usage.export`。
+- 新增环境变量 `APP_ENCRYPTION_KEY`：生产缺失时启动失败，开发缺失用固定 dev key 并打印警告。
+
+### 17.2 前端（web）
+
+- `services/api/gateway.ts`：`ModelEntry`、`GatewayInfo`、`GATEWAY_BASE_URL`、`gatewayHeaders`、`toGatewayConfig`。
+- `stores/use-model-store.ts`：`/models/available` 缓存（`setWorkspace` / `setEntry` / `reload` / `useModelEntry`）。
+- `stores/use-config-store.ts`：`AiConfig` 增加不落盘的 `gateway`/`modelValue`；`resolveModelRequestConfig`、`isAiConfigReady`、`buildApiUrl`、`withLocalProxy`、`useEffectiveConfig` 支持网关态（团队模式把服务端渠道叠加进本地渠道列表，模型选择器无需改动）。
+- 生成请求（`image.ts`、`video.ts`、`audio.ts`）在网关态改发 `x-workspace-id` / `x-model` / `x-entry` / `x-csrf-token`，不再发送 `Authorization`。
+- 页面：`pages/workspace/models.tsx`（渠道与模型三栏）、`model-grants.tsx`（授权矩阵 + 配额总览 + 空间默认模型）、`usage.tsx`（KPI + 每日柱状图 + 成本构成 + 按成员 + 导出）。路由 `/w/:wsId/models`、`/w/:wsId/models/grants`、`/w/:wsId/usage`，侧栏增加「模型」「用量」。
+- `vite.config.ts` 增加 `/v1/gateway` 开发代理；`nginx.team.conf` 增加 `/v1/gateway/` location（`proxy_buffering off`）。
+
+### 17.3 已知边界
+
+- 团队模式下的图像页/视频页仍是本地模式页面（没有 `/w/:wsId` 路径），因此授权里的「图像页」「视频页」入口暂不会命中；画布节点入口 `canvas` 已实测走网关。
+- 网关只代理 OpenAI 兼容协议；Gemini 渠道需要在二期补适配层。
+

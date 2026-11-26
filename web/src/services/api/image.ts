@@ -3,6 +3,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
+import { gatewayHeaders } from "./gateway";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -46,30 +47,12 @@ type ToolResponseResult = {
 
 type ToolChoice = "auto" | "required" | { type: "function"; name: string };
 type ResponseMessageContent = AiTextMessage["content"] | string;
-type ResponseInputContent = { type: "input_text"; text: string } | { type: "input_image"; image_url: string };
-type ResponseInputItem =
-    | { role: "system" | "user" | "assistant"; content: string | ResponseInputContent[] }
-    | { type: "function_call"; call_id: string; name: string; arguments: string }
-    | { type: "function_call_output"; call_id: string; output: string };
-type ResponseApiToolDefinition = {
-    type: "function";
-    name: string;
-    description?: string;
-    parameters: Record<string, unknown>;
-    strict?: boolean;
-};
-type ResponseApiOutputItem =
-    | { type?: "message"; content?: Array<{ type?: string; text?: string }> }
-    | { type?: "function_call"; id?: string; call_id?: string; name?: string; arguments?: string };
-type ResponseApiPayload = {
-    id?: string;
-    output?: ResponseApiOutputItem[];
-    output_text?: string;
+type ChatCompletionPayload = {
+    choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
     error?: { message?: string };
     code?: number;
     msg?: string;
 };
-type ResponseStreamState = { buffer: string; text: string; payload?: ResponseApiPayload; error?: string };
 
 type ImageApiResponse = {
     data?: Array<Record<string, unknown>>;
@@ -315,6 +298,8 @@ function aiApiUrl(config: AiConfig, path: string) {
 }
 
 function aiHeaders(config: AiConfig, contentType?: string) {
+    const gateway = gatewayHeaders(config, contentType);
+    if (gateway) return gateway;
     return {
         Authorization: `Bearer ${config.apiKey}`,
         ...(contentType ? { "Content-Type": contentType } : {}),
@@ -344,51 +329,9 @@ function geminiHeaders(config: Pick<AiConfig, "apiKey">) {
     };
 }
 
-function withSystemMessage<T extends ResponseInputMessage>(config: AiConfig, messages: T[]): ResponseInputMessage[] {
+function withSystemMessage(config: AiConfig, messages: AiTextMessage[]): AiTextMessage[] {
     const systemPrompt = config.systemPrompt.trim();
     return systemPrompt ? [{ role: "system" as const, content: systemPrompt }, ...messages] : messages;
-}
-
-function toResponseInput(messages: ResponseInputMessage[]): ResponseInputItem[] {
-    return messages.flatMap((message): ResponseInputItem[] => {
-        if ("type" in message) return [message];
-        if (message.role === "tool") return [{ type: "function_call_output", call_id: message.tool_call_id, output: message.content }];
-        return [{ role: message.role, content: toResponseContent(message.content || "") }];
-    });
-}
-
-function toResponseContent(content: ResponseMessageContent): string | ResponseInputContent[] {
-    if (!Array.isArray(content)) return String(content || "");
-    return content.map((item) => (item.type === "text" ? { type: "input_text" as const, text: item.text } : { type: "input_image" as const, image_url: item.image_url.url }));
-}
-
-function toResponseTool(tool: ResponseFunctionTool): ResponseApiToolDefinition {
-    return {
-        type: "function",
-        name: tool.function.name,
-        description: tool.function.description,
-        parameters: tool.function.parameters,
-        strict: tool.function.strict,
-    };
-}
-
-function parseToolResponse(payload: ResponseApiPayload): ToolResponseResult {
-    const output = payload.output || [];
-    const content =
-        payload.output_text ||
-        output
-            .flatMap((item) => (item.type === "message" ? item.content || [] : []))
-            .map((item) => item.text || "")
-            .join("");
-    const toolCalls = output
-        .filter((item): item is Extract<ResponseApiOutputItem, { type?: "function_call" }> => item.type === "function_call")
-        .map((item) => ({
-            id: item.call_id || item.id || "",
-            type: "function" as const,
-            function: { name: item.name || "", arguments: item.arguments || "{}" },
-        }))
-        .filter((item) => item.id && item.function.name);
-    return { content, toolCalls };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -407,11 +350,6 @@ function stringValue(value: unknown) {
     return typeof value === "string" ? value : "";
 }
 
-function validateResponsePayload(payload: ResponseApiPayload) {
-    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(payload.msg || apiText("requestFailed"));
-    if (payload.error?.message) throw new Error(payload.error.message);
-}
-
 function validateGeminiPayload(payload: GeminiPayload) {
     if (payload.error?.message) throw new Error(payload.error.message);
     if (payload.promptFeedback?.blockReason) throw new Error(apiText("geminiRejected", { reason: payload.promptFeedback.blockReason }));
@@ -427,77 +365,33 @@ async function readFetchError(response: Response, fallback: string) {
     }
 }
 
-function consumeResponseStreamBlock(block: string, state: ResponseStreamState, onDelta?: (text: string) => void) {
-    const data = block
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).replace(/^ /, ""))
-        .join("\n")
-        .trim();
-    if (!data || data === "[DONE]") return;
-    const event = JSON.parse(data) as Record<string, unknown>;
-    const type = stringValue(event.type);
-    const errorMessage = responseErrorMessage(event);
-    if (errorMessage) state.error = errorMessage;
-    if (type === "response.output_text.delta" && typeof event.delta === "string") {
-        state.text += event.delta;
-        onDelta?.(state.text);
-    }
-    if (type === "response.output_text.done" && !state.text && typeof event.text === "string") {
-        state.text = event.text;
-        onDelta?.(state.text);
-    }
-    if (type === "response.completed" && isRecord(event.response)) {
-        state.payload = event.response as ResponseApiPayload;
-    } else if (Array.isArray(event.output)) {
-        state.payload = event as ResponseApiPayload;
-    }
-}
-
-function consumeResponseStreamText(state: ResponseStreamState, text: string, onDelta?: (text: string) => void, flush = false) {
-    state.buffer += text;
-    for (;;) {
-        const match = state.buffer.match(/\r?\n\r?\n/);
-        if (!match) break;
-        const index = match.index ?? 0;
-        consumeResponseStreamBlock(state.buffer.slice(0, index), state, onDelta);
-        state.buffer = state.buffer.slice(index + match[0].length);
-    }
-    if (flush && state.buffer.trim()) {
-        consumeResponseStreamBlock(state.buffer, state, onDelta);
-        state.buffer = "";
-    }
-}
-
-async function requestStreamingResponse(config: AiConfig, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
-    const response = await fetch(aiApiUrl(config, "/responses"), {
+/**
+ * 文本模型统一走 Chat Completions：请求体为 { model, messages, stream: false }。
+ */
+async function requestChatCompletion(config: AiConfig, messages: AiTextMessage[], onDelta?: (text: string) => void, options?: RequestOptions) {
+    const response = await fetch(aiApiUrl(config, "/chat/completions"), {
         method: "POST",
-        headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
-        body: JSON.stringify({ ...body, stream: true }),
+        headers: { ...aiHeaders(config, "application/json"), Accept: "application/json" },
+        body: JSON.stringify({
+            model: config.model,
+            messages,
+            ...(config.reasoningEffort === "auto" ? {} : { reasoning_effort: config.reasoningEffort }),
+            stream: false,
+        }),
         signal: options?.signal,
     });
     if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
-    if (!response.body) {
-        const payload = (await response.json()) as ResponseApiPayload;
-        validateResponsePayload(payload);
-        return parseToolResponse(payload);
-    }
+    const payload = (await response.json()) as ChatCompletionPayload;
+    if (payload.error?.message) throw new Error(payload.error.message);
+    if (typeof payload.code === "number" && payload.code !== 0) throw new Error(payload.msg || apiText("requestFailed"));
+    const content = chatContent(payload.choices?.[0]?.message?.content);
+    if (content) onDelta?.(content);
+    return content;
+}
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    const state: ResponseStreamState = { buffer: "", text: "" };
-    for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        consumeResponseStreamText(state, decoder.decode(value, { stream: true }), onDelta);
-        if (state.error) throw new Error(state.error);
-    }
-    consumeResponseStreamText(state, decoder.decode(), onDelta, true);
-    if (state.error) throw new Error(state.error);
-    if (!state.payload) return { content: state.text, toolCalls: [] };
-    validateResponsePayload(state.payload);
-    const result = parseToolResponse(state.payload);
-    return { ...result, content: state.text || result.content };
+function chatContent(content: string | Array<{ text?: string }> | undefined): string {
+    if (typeof content === "string") return content;
+    return Array.isArray(content) ? content.map((item) => item.text || "").join("") : "";
 }
 
 function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?: Record<string, unknown>) {
@@ -844,11 +738,7 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
             if (answer === apiText("noContent")) onDelta(answer);
             return answer;
         }
-        const answer = (await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-            ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
-        }, onDelta, options)).content || apiText("noContent");
+        const answer = (await requestChatCompletion(requestConfig, withSystemMessage(requestConfig, messages), onDelta, options)) || apiText("noContent");
         if (answer === apiText("noContent")) onDelta(answer);
         return answer;
     } catch (error) {

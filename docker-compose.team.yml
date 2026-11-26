@@ -16,6 +16,7 @@ services:
       REGISTRATION_MODE: ${REGISTRATION_MODE:-open}
       AUTO_VERIFY_EMAIL: ${AUTO_VERIFY_EMAIL:-true}
       FILE_URL_SECRET: ${FILE_URL_SECRET:-canvas-dev-secret-change-me}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?set APP_ENCRYPTION_KEY in .env}
       DATA_DIR: /data/uploads
     volumes:
       - uploads:/data/uploads

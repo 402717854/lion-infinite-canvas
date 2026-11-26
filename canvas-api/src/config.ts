@@ -31,6 +31,7 @@ export const config = {
     dataDir: path.resolve(rootDir, dataDir),
     fileUrlSecret: process.env.FILE_URL_SECRET || 'canvas-dev-secret-change-me',
     fileUrlTtlSeconds: int(process.env.FILE_URL_TTL_SECONDS, 3600),
+    encryptionKey: process.env.APP_ENCRYPTION_KEY || '',
 };
 
 export type Config = typeof config;

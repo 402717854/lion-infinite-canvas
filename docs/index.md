@@ -8,7 +8,7 @@
 - [部署](deployment.md)：Docker、源码构建、Vercel、Render、canvas-api + PostgreSQL 全栈
 - [待办](todo.md)：后续要做的事
 - [待测试](pending-test.md)：已实现但仍需人工验证的清单
-- [模型管理 M3](model-management.md)：渠道、模型、授权配额、网关与用量的需求文档（待确认）
+- [模型管理 M3](model-management.md)：渠道、模型、授权配额、网关与用量的需求文档与实现说明
 
 ## 相关文档
 
@@ -23,7 +23,7 @@
 
 - 纯前端模式下，画布项目、「我的素材」、生成记录和 AI API Key 都存在浏览器本地（IndexedDB / localforage）；不要写成已支持云同步。
 - 团队模式下，项目文档、素材元数据、会话与审计在 canvas-api + PostgreSQL；登录不会替换浏览器里的本地数据，迁移是复制而不是移动。
-- AI API Key 由浏览器持有并直连 OpenAI 兼容接口，不经过 canvas-api；canvas-proxy 只做本机转发。
+- 本地模式下 AI API Key 由浏览器持有并直连 OpenAI 兼容接口；团队模式下渠道与 Key 只存在 canvas-api（AES-256-GCM 密文），生成请求经 `/v1/gateway/**` 转发，接口只回掩码。canvas-proxy 只做本机转发。
 - 邮箱验证与找回密码目前没有 SMTP，令牌打印在 canvas-api 控制台。
 - 前端镜像只包含静态前端；团队模式可用 `docker-compose.team.yml` 一次构建前端与 canvas-api 镜像并连接已有的 PostgreSQL（不启动数据库容器），也可以分别部署 canvas-api 与 PostgreSQL。
 - 文档不写会过期的日期，除非用户明确要求记录时间。

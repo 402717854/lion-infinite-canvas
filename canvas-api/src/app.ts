@@ -11,6 +11,10 @@ import { importRouter, projectsRouter, workspaceProjectsRouter } from './routes/
 import { assetsRouter, workspaceAssetsRouter } from './routes/assets.js';
 import { filesRouter, workspaceFilesRouter } from './routes/files.js';
 import { auditRouter } from './routes/audit.js';
+import { channelsRouter } from './routes/channels.js';
+import { modelsRouter } from './routes/models.js';
+import { usageRouter } from './routes/usage.js';
+import { gatewayRouter } from './routes/gateway.js';
 
 export function createApp() {
     ensureDataDir();
@@ -43,9 +47,12 @@ export function createApp() {
     });
 
     app.use(cookieParser());
-    app.use(express.json({ limit: '10mb' }));
     app.use(attachAuth);
     app.use(csrfProtection);
+
+    // 网关自带 body 解析（multipart/SSE），必须挂在全局 express.json 之前。
+    app.use('/v1/gateway', gatewayRouter);
+    app.use(express.json({ limit: '10mb' }));
 
     app.get('/api/health', (_req, res) => ok(res, { status: 'ok' }));
     app.use('/api/auth', authRouter);
@@ -55,11 +62,17 @@ export function createApp() {
     app.use('/api/workspaces', workspaceFilesRouter);
     app.use('/api/workspaces', importRouter);
     app.use('/api/workspaces', auditRouter);
+    app.use('/api/workspaces', channelsRouter);
+    app.use('/api/workspaces', modelsRouter);
+    app.use('/api/workspaces', usageRouter);
     app.use('/api/invitations', invitationsRouter);
     app.use('/api/projects', projectsRouter);
     app.use('/api/assets', assetsRouter);
     app.use('/api/files', filesRouter);
 
+    app.use('/v1', (_req, _res, next) => {
+        next(fail(404, 'NOT_FOUND', '接口不存在'));
+    });
     app.use('/api', (_req, _res, next) => {
         next(fail(404, 'NOT_FOUND', '接口不存在'));
     });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Dropdown, Spin } from "antd";
-import { ChevronDown, FolderKanban, LogOut, Plus, ScrollText, Settings2, ShieldCheck, UserRound, Users } from "lucide-react";
+import { ChevronDown, FolderKanban, LogOut, Plus, ScrollText, Settings2, ShieldCheck, UserRound, Users, Cpu, ChartColumn } from "lucide-react";
 
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 import { roleLabel } from "@/constant/permissions";
@@ -9,10 +9,13 @@ import { useWorkspaceAccess } from "@/hooks/use-workspace-access";
 import { useWorkspaceProjects } from "@/hooks/use-workspace-projects";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/use-auth-store";
+import { useModelStore } from "@/stores/use-model-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 const NAV_ITEMS = [
     { key: "projects", label: "项目", to: "", icon: FolderKanban, permission: "project.read" },
+    { key: "models", label: "模型", to: "models", icon: Cpu, permission: "model.read" },
+    { key: "usage", label: "用量", to: "usage", icon: ChartColumn, permission: "usage.read" },
     { key: "members", label: "成员", to: "members", icon: Users, permission: "member.read" },
     { key: "roles", label: "角色", to: "roles", icon: ShieldCheck, permission: "role.read" },
     { key: "audit", label: "审计", to: "audit", icon: ScrollText, permission: "audit.read" },
@@ -34,12 +37,18 @@ export default function WorkspaceLayout() {
     const theme = useThemeStore((state) => state.theme);
     const setTheme = useThemeStore((state) => state.setTheme);
     const { workspace, can } = useWorkspaceAccess(wsId);
+    const setModelWorkspace = useModelStore((state) => state.setWorkspace);
     const [switcherOpen, setSwitcherOpen] = useState(false);
     useWorkspaceProjects(wsId, true);
 
     useEffect(() => {
         if (status === "idle") void loadSession();
     }, [loadSession, status]);
+
+    useEffect(() => {
+        setModelWorkspace(wsId || null);
+        return () => setModelWorkspace(null);
+    }, [setModelWorkspace, wsId]);
 
     const activeKey = useMemo(() => {
         const segment = location.pathname.split("/")[3] || "";

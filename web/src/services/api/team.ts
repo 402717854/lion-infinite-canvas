@@ -1,5 +1,25 @@
 import { apiRequest, apiUpload } from "@/services/api/client";
-import type { AssetRecord, AuditRecord, InvitationRecord, Me, MemberRecord, ProjectDetail, ProjectDoc, ProjectSummary, RoleRecord } from "@/types/team";
+import type {
+    AssetRecord,
+    AuditRecord,
+    AvailableModelsPayload,
+    ChannelRecord,
+    InvitationRecord,
+    Me,
+    MemberRecord,
+    ModelBindingsPayload,
+    ModelCapabilityValue,
+    ModelEntryValue,
+    ModelGrantItem,
+    ModelGrantsPayload,
+    ModelPricing,
+    ModelRecord,
+    ProjectDetail,
+    ProjectDoc,
+    ProjectSummary,
+    RoleRecord,
+    UsagePayload,
+} from "@/types/team";
 
 export type RegisterResult = Me & { verificationToken?: string; pending?: boolean };
 
@@ -57,4 +77,81 @@ export const assetApi = {
     create: (workspaceId: string, payload: Partial<AssetRecord> & { kind: AssetRecord["kind"]; title: string }) =>
         apiRequest<{ asset: AssetRecord }>(`/api/workspaces/${workspaceId}/assets`, { method: "POST", body: payload }),
     remove: (assetId: string) => apiRequest<void>(`/api/assets/${assetId}`, { method: "DELETE" }),
+};
+
+export const modelApi = {
+    channels: (workspaceId: string) => apiRequest<ChannelRecord[]>(`/api/workspaces/${workspaceId}/channels`),
+    createChannel: (workspaceId: string, payload: { name: string; baseUrl: string; apiKey: string; timeoutMs?: number; retry?: number; enabled?: boolean }) =>
+        apiRequest<ChannelRecord>(`/api/workspaces/${workspaceId}/channels`, { method: "POST", body: payload }),
+    updateChannel: (
+        workspaceId: string,
+        channelId: string,
+        payload: { name?: string; baseUrl?: string; apiKey?: string; timeoutMs?: number; retry?: number; enabled?: boolean },
+    ) => apiRequest<ChannelRecord>(`/api/workspaces/${workspaceId}/channels/${channelId}`, { method: "PATCH", body: payload }),
+    removeChannel: (workspaceId: string, channelId: string) => apiRequest<{ id: string }>(`/api/workspaces/${workspaceId}/channels/${channelId}`, { method: "DELETE" }),
+    testChannel: (workspaceId: string, channelId: string, payload: { baseUrl?: string; apiKey?: string } = {}) =>
+        apiRequest<{ ok: boolean; status: number; latencyMs: number; modelCount: number; sample: string[]; summary?: string }>(
+            `/api/workspaces/${workspaceId}/channels/${channelId}/test`,
+            { method: "POST", body: payload },
+        ),
+    upstreamModels: (workspaceId: string, channelId: string) =>
+        apiRequest<{ items: Array<{ id: string; imported: boolean }> }>(`/api/workspaces/${workspaceId}/channels/${channelId}/models/upstream`),
+    importModels: (workspaceId: string, channelId: string, models: Array<{ modelId: string; displayName?: string; capabilities?: ModelCapabilityValue[] }>) =>
+        apiRequest<{ created: number; skipped: number }>(`/api/workspaces/${workspaceId}/channels/${channelId}/models/import`, { method: "POST", body: { models } }),
+    models: (workspaceId: string, params: { channelId?: string; capability?: string } = {}) => {
+        const query = new URLSearchParams();
+        Object.entries(params).forEach(([key, value]) => value && query.set(key, value));
+        return apiRequest<ModelRecord[]>(`/api/workspaces/${workspaceId}/models?${query.toString()}`);
+    },
+    createModel: (
+        workspaceId: string,
+        payload: {
+            channelId: string;
+            modelId: string;
+            displayName?: string;
+            capabilities?: ModelCapabilityValue[];
+            params?: Record<string, unknown>;
+            pricing?: ModelPricing;
+            enabled?: boolean;
+            note?: string | null;
+        },
+    ) => apiRequest<ModelRecord>(`/api/workspaces/${workspaceId}/models`, { method: "POST", body: payload }),
+    updateModel: (
+        workspaceId: string,
+        modelId: string,
+        payload: {
+            displayName?: string;
+            capabilities?: ModelCapabilityValue[];
+            params?: Record<string, unknown>;
+            pricing?: ModelPricing;
+            enabled?: boolean;
+            note?: string | null;
+        },
+    ) => apiRequest<ModelRecord>(`/api/workspaces/${workspaceId}/models/${modelId}`, { method: "PATCH", body: payload }),
+    removeModel: (workspaceId: string, modelId: string) => apiRequest<{ id: string }>(`/api/workspaces/${workspaceId}/models/${modelId}`, { method: "DELETE" }),
+    available: (workspaceId: string) => apiRequest<AvailableModelsPayload>(`/api/workspaces/${workspaceId}/models/available`),
+    grants: (workspaceId: string, modelId: string) =>
+        apiRequest<ModelGrantsPayload>(`/api/workspaces/${workspaceId}/model-grants?modelId=${encodeURIComponent(modelId)}`),
+    saveGrants: (workspaceId: string, modelId: string, items: ModelGrantItem[]) =>
+        apiRequest<{ modelId: string; items: number }>(`/api/workspaces/${workspaceId}/model-grants`, { method: "PUT", body: { modelId, items } }),
+    bindings: (workspaceId: string) => apiRequest<ModelBindingsPayload>(`/api/workspaces/${workspaceId}/model-bindings`),
+    saveBindings: (workspaceId: string, payload: Partial<Record<ModelCapabilityValue, string | null>>) =>
+        apiRequest<Record<string, string>>(`/api/workspaces/${workspaceId}/model-bindings`, { method: "PUT", body: payload }),
+    usage: (
+        workspaceId: string,
+        params: { from?: string; to?: string; groupBy?: "day" | "user" | "model" | "channel"; userId?: string; modelId?: string; capability?: string; entry?: ModelEntryValue } = {},
+    ) => {
+        const query = new URLSearchParams();
+        Object.entries(params).forEach(([key, value]) => value && query.set(key, String(value)));
+        return apiRequest<UsagePayload>(`/api/workspaces/${workspaceId}/usage?${query.toString()}`);
+    },
+    exportUsage: async (workspaceId: string, params: { from?: string; to?: string }) => {
+        const query = new URLSearchParams();
+        Object.entries(params).forEach(([key, value]) => value && query.set(key, value));
+        const response = await fetch(`${import.meta.env.VITE_API_BASE || ""}/api/workspaces/${workspaceId}/usage/export.csv?${query.toString()}`, {
+            credentials: "include",
+        });
+        if (!response.ok) throw new Error("导出失败，请稍后重试");
+        return response.blob();
+    },
 };

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [修复] 文本模型请求改为 Chat Completions：请求体为 `{ model, messages, stream: false }`，不再发送 Responses 形态的 `input` 数组；网关端点同步改为 `/v1/gateway/chat/completions`。
++ [新增] 模型管理 M3：空间级渠道与模型条目（密钥 AES-256-GCM 加密托管、接口只回掩码、连通性测试、从上游一键拉取导入、能力与参数模板），按空间/角色/成员三档授权（可见、可用入口、日/月次数配额），新增 `/v1/gateway/**` 调用网关（生图、图片编辑、视频、文本 SSE、音频）统一转发并逐次计量，超限返回 402 硬拦截；前端新增「模型」与「用量」页面，团队模式的画布生成改走服务端网关，渠道 Key 不再下发到浏览器。
 + [新增] 新增团队模式全栈 Compose（`docker-compose.team.yml`）：前端与 canvas-api 都按源码构建镜像，内置 `/api` 反代，通过 `.env` 里的 `DATABASE_URL` 连接已有的 PostgreSQL（不启动数据库容器），建表用一次性命令手动执行。
 + [新增] 团队平台 M1/M2：新增 `canvas-api` 服务（邮箱注册登录与会话、空间、成员与角色、41 个权限点、项目与素材云端存储、审计、本地数据迁移），前端新增登录/注册/邀请/引导、空间工作台与成员/角色/审计/设置页面、云端项目保存与只读态。
 + [文档] 文档从 fumadocs 站点改为仓库内纯 Markdown，重新整理快速开始、部署（含 canvas-api + PostgreSQL 全栈）与待办清单。
